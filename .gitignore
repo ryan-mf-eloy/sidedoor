@@ -1,0 +1,10 @@
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+sidedoor.db*
+.DS_Store
+*.log
+.env
+coverage/
+.claude/

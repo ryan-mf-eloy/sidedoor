@@ -1,0 +1,50 @@
+/* Base reset + theme, matching the Sidedoor design. */
+:root {
+  /* Corner-rounding scale. Pill/capsule shapes (toggle switches, the rate
+     usage bar) size their radius off their own height instead — they're a
+     distinct shape, not a step on this scale — so they stay literal. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: #100e0b;
+  color: #cfc8bc;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: rgba(237, 236, 236, 0.24); color: #f2ede3; }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: rgba(245, 240, 230, 0.09); border-radius: var(--radius-sm); border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(245, 240, 230, 0.16); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+input, button, textarea, select { font-family: inherit; color: inherit; }
+input, textarea, select { border: none; -webkit-appearance: none; appearance: none; font-family: inherit; margin: 0; }
+input:focus, textarea:focus, select:focus { outline: none; }
+input::placeholder, textarea::placeholder { color: #57524a; }
+button { cursor: pointer; border: none; }
+a { color: inherit; }
+
+@keyframes sd-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.78); } }
+@keyframes sd-flash { 0% { background: rgba(35, 134, 54, 0.16); } 100% { background: transparent; } }
+@keyframes sd-in { 0% { opacity: 0; transform: translateY(4px); } 100% { opacity: 1; transform: translateY(0); } }
+@keyframes sd-scrim { 0% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes sd-pop { 0% { opacity: 0; transform: translateY(10px) scale(.972); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes sd-spin { to { transform: rotate(360deg); } }
+
+/* Hover helper: elements with data-hover get a background/color swap. */
+[data-hover] { transition: background .14s, color .14s; }
+
+#app { display: block; }
+
+/* Toasts */
+#toast-root { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.sd-toast {
+  background: #211d17; color: #efe9df; font-size: 13px; font-weight: 500;
+  padding: 10px 16px; border-radius: var(--radius-sm); box-shadow: 0 16px 40px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(245,240,230,0.08);
+  animation: sd-pop .2s cubic-bezier(.22,.9,.32,1.16); display: flex; align-items: center; gap: 9px;
+}
