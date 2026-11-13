@@ -9,7 +9,7 @@ import { newId, slugify } from './lib/ids.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
-const SCHEMA_VERSION = '2';
+const SCHEMA_VERSION = '5';
 
 export function openDb(dbPath) {
   const db = new DatabaseSync(dbPath);
@@ -22,6 +22,8 @@ export function openDb(dbPath) {
   // only ever CREATEs TABLE IF NOT EXISTS, so it can't widen a constraint on
   // a table that already exists with the old shape).
   migrateMatchRulesV2(db);
+  migrateEndpointPathMode(db);
+  migrateRealtimeV5(db);
 
   db.exec(SCHEMA);
 
@@ -67,6 +69,35 @@ function migrateMatchRulesV2(db) {
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
+  }
+}
+
+
+function migrateEndpointPathMode(db) {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='endpoints'").get();
+  if (!table) return;
+  const cols = db.prepare("PRAGMA table_info(endpoints)").all().map((r) => r.name);
+  if (!cols.includes('path_mode')) {
+    db.exec("ALTER TABLE endpoints ADD COLUMN path_mode TEXT NOT NULL DEFAULT 'exact'");
+  }
+  if (!cols.includes('allowed_methods')) {
+    db.exec('ALTER TABLE endpoints ADD COLUMN allowed_methods TEXT');
+  }
+}
+
+// v4 -> v5: protocol-aware endpoints retain the existing `type` axis
+// (inspector/mock) and add an independent transport axis. ALTER TABLE is
+// sufficient here because the new fields have safe defaults; existing HTTP
+// endpoint rows therefore keep their exact runtime behavior.
+function migrateRealtimeV5(db) {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='endpoints'").get();
+  if (!table) return;
+  const cols = db.prepare('PRAGMA table_info(endpoints)').all().map((r) => r.name);
+  if (!cols.includes('protocol')) {
+    db.exec("ALTER TABLE endpoints ADD COLUMN protocol TEXT NOT NULL DEFAULT 'http'");
+  }
+  if (!cols.includes('config_realtime')) {
+    db.exec('ALTER TABLE endpoints ADD COLUMN config_realtime TEXT');
   }
 }
 

@@ -1,5 +1,5 @@
 // Webhook inspector (live feed), request detail, and diff.
-import { h, raw, icons, kebabMenu, hlJSON, fmtClock, fmtStamp, fmtBytes, methodColor, statusColor } from '../ui.js';
+import { h, raw, codeBlock, icons, kebabMenu, fmtClock, fmtStamp, fmtBytes, methodColor, statusColor } from '../ui.js';
 import { endpointMenuItems } from './endpoint.js';
 
 const METHODS = ['ALL', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'QUERY'];
@@ -128,7 +128,7 @@ function previewPane(app) {
       metaCard('Received', fmtStamp(r.receivedAt)), metaCard('Source IP', r.ip || '—'),
       metaCard('Size', fmtBytes(r.size)), metaCard('Content-Type', r.contentType || '—')),
     h('button', { style: 'display:flex;align-items:center;gap:6px;background:#211d17;color:#d9d3c7;border-radius:var(--radius-xs);padding:8px 12px;font-size:12px;font-weight:600;margin-bottom:14px', onclick: () => app.openRequest(r.id, r.endpointId) }, 'Open full detail', raw(icons.chevRight({ w: 13, sw: 2 }))),
-    r.body ? h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:14px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:#c2bbb0;overflow-x:auto;white-space:pre", html: hlJSON(r.body) }) : h('div', { style: 'background:#141210;border-radius:var(--radius-sm);padding:20px;text-align:center;font-size:12.5px;color:#7a746a' }, 'No body')));
+    r.body ? codeBlock(r.body, { label: 'Payload', style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:14px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" }) : h('div', { style: 'background:#141210;border-radius:var(--radius-sm);padding:20px;text-align:center;font-size:12.5px;color:#7a746a' }, 'No body')));
   return wrap;
 }
 
@@ -154,8 +154,8 @@ export function requestScreen(app) {
   if (s.detailTab === 'headers') tabContent = kvTable(headersArr);
   else if (s.detailTab === 'query') tabContent = queryArr.length ? kvTable(queryArr) : emptyBox('No query parameters on this request.');
   else tabContent = r.body ? h('div', { style: 'position:relative' },
-    h('button', { style: 'position:absolute;top:12px;right:12px;z-index:2;background:#211d17;color:#a49c91;border-radius:var(--radius-xs);padding:5px 11px;font-size:11px;font-weight:600', onclick: () => app.copy(r.body, 'detail-body') }, s.copied === 'detail-body' ? 'Copied' : 'Copy'),
-    h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow-x:auto;white-space:pre", html: hlJSON(r.body) })) : emptyBox('No request body.');
+    h('button', { style: 'position:absolute;top:34px;right:12px;z-index:2;background:#211d17;color:#a49c91;border-radius:var(--radius-xs);padding:5px 11px;font-size:11px;font-weight:600', onclick: () => app.copy(r.body, 'detail-body') }, s.copied === 'detail-body' ? 'Copied' : 'Copy'),
+    codeBlock(r.body, { label: 'Payload', style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" })) : emptyBox('No request body.');
 
   return h('div', { style: 'height:100%;overflow-y:auto' }, h('div', { style: 'max-width:900px;margin:0 auto;padding:22px 28px 64px 28px' },
     h('button', { style: 'display:flex;align-items:center;gap:7px;background:transparent;color:#8a837a;font-size:13px;font-weight:500;padding:0;margin-bottom:20px', onclick: app.backToInspector }, raw(icons.chevLeft({ w: 16, sw: 1.9 })), 'Back to live feed'),
@@ -182,7 +182,7 @@ function replayResultView(res) {
   return h('div', { style: 'background:#0f0e0b;border-radius:var(--radius-xs);padding:11px 13px' },
     h('div', { style: "font-family:'IBM Plex Mono',monospace;font-size:12px;margin-bottom:6px" },
       h('span', { style: `font-weight:700;color:${statusColor(res.status)}` }, String(res.status)), h('span', { style: 'color:#7a746a' }, ` ${res.statusText || ''} · ${res.durationMs}ms`)),
-    res.body ? h('pre', { style: "margin:0;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#b3aca1;max-height:180px;overflow:auto;white-space:pre-wrap", html: hlJSON(res.body) }) : null);
+    res.body ? codeBlock(res.body, { label: 'Response', showMeta: false, style: "margin:0;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#b3aca1;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" }) : null);
 }
 
 function kvTable(entries) {

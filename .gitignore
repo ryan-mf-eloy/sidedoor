@@ -6,5 +6,7 @@ sidedoor.db*
 .DS_Store
 *.log
 .env
+.env.*
+!.env.example
 coverage/
 .claude/

@@ -1,6 +1,7 @@
 // Dashboard, Webhooks list, and Mock Servers list.
 import { h, raw, icons, kebabMenu, fmtRel, methodColor, statusColor, segment, sparkline } from '../ui.js';
 import { endpointMenuItems, scrim, label, input, errline } from './endpoint.js';
+import { protocolColor, protocolLabel } from './realtime.js';
 
 function epKebab(app, ep) {
   const id = 'epmenu-' + ep.id;
@@ -78,7 +79,7 @@ export function dashboardScreen(app) {
   const counts = s.counts || {};
   const funnelActive = s.funnel.state && s.funnel.state.active;
   const funnelColor = funnelActive ? '#7fc79b' : '#8a837a';
-  const unsigned = s.endpoints.filter((e) => e.type === 'inspector' && !e.signed);
+  const unsigned = s.endpoints.filter((e) => e.type === 'inspector' && (e.protocol || 'http') === 'http' && !e.signed);
   const hasWarn = funnelActive && unsigned.length > 0;
 
   // create split-button
@@ -87,7 +88,7 @@ export function dashboardScreen(app) {
     h('div', { style: 'position:absolute;top:calc(100% + 8px);right:0;z-index:41;width:288px;background:#211d17;border-radius:var(--radius-md);padding:6px;box-shadow:0 20px 48px rgba(0,0,0,0.62);animation:sd-in .12s ease' },
       h('div', { style: 'padding:8px 11px 7px 11px;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#6a655c' }, 'Create'),
       createMenuItem(icons.webhook, '#238636', 'Webhook', 'Receive & inspect requests', () => { app.closeCreateMenu(); app.newWebhook(); }),
-      createMenuItem(icons.mock, '#d69a3c', 'Mock server', 'Simulate a third-party API', () => { app.closeCreateMenu(); app.newMock(); }))) : null;
+      createMenuItem(icons.mock, '#d69a3c', 'Mock server', 'HTTP, WebSocket, Socket.IO or GraphQL', () => { app.closeCreateMenu(); app.chooseMockProtocol(); }))) : null;
 
   const createBtn = h('button', { style: 'display:flex;align-items:center;gap:9px;background:#edecec;color:#1a0e07;border-radius:var(--radius-sm);padding:10px 14px;font-size:13.5px;font-weight:600;box-shadow:inset 0 1px 0 rgba(255,255,255,0.5),0 6px 18px rgba(0,0,0,0.34);cursor:pointer', onclick: app.toggleCreateMenu },
     raw(icons.plus({ w: 16, sw: 2.2 })), h('span', {}, 'New endpoint'),
@@ -154,7 +155,7 @@ function createMenuItem(iconFn, color, title, sub, onClick) {
 
 export function webhooksScreen(app) {
   const s = app.s;
-  const eps = s.endpoints.filter((e) => e.type === 'inspector');
+  const eps = s.endpoints.filter((e) => e.type === 'inspector' && (e.protocol || 'http') === 'http');
   return h('div', { style: PAGE },
     listHeader('Webhooks', 'Receive & inspect incoming requests. Each endpoint gets a unique URL and keeps full history.', primaryBtn('New webhook', app.newWebhook, icons.plus)),
     eps.length ? groupedGrid(app, eps, webhookCard) : emptyState('No webhooks yet', 'Create one to start capturing requests.'));
@@ -162,14 +163,76 @@ export function webhooksScreen(app) {
 
 export function mocksScreen(app) {
   const s = app.s;
-  const eps = s.endpoints.filter((e) => e.type === 'mock');
+  const all = s.endpoints.filter(isMockServerEndpoint);
+  const selectedProtocol = s.mockProtocolFilter || 'all';
+  const eps = selectedProtocol === 'all' ? all : all.filter((endpoint) => (endpoint.protocol || 'http') === selectedProtocol);
+  const filterOptions = [
+    { value: 'all', label: 'All', count: all.length },
+    { value: 'http', label: 'HTTP', count: all.filter((endpoint) => (endpoint.protocol || 'http') === 'http').length },
+    { value: 'websocket', label: 'WebSocket', count: all.filter((endpoint) => endpoint.protocol === 'websocket').length },
+    { value: 'socketio', label: 'Socket.IO', count: all.filter((endpoint) => endpoint.protocol === 'socketio').length },
+    { value: 'graphql', label: 'GraphQL', count: all.filter((endpoint) => endpoint.protocol === 'graphql').length },
+  ];
   return h('div', { style: PAGE },
-    listHeader('Mock Servers', 'Simulate third-party APIs. Configure the method, response, headers, auth and scenarios.', primaryBtn('New mock', app.newMock, icons.plus)),
-    eps.length ? groupedGrid(app, eps, mockCard) : emptyState('No mock servers yet', 'Create one to simulate an API.'));
+    listHeader('Mock Servers', 'Build and exercise HTTP, WebSocket, Socket.IO and GraphQL APIs from one place.', primaryBtn('New mock server', app.chooseMockProtocol, icons.plus)),
+    h('div', { style: 'display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:-8px 0 22px' }, ...filterOptions.map((option) => mockProtocolFilter(app, option, selectedProtocol))),
+    all.length
+      ? eps.length
+        ? groupedGrid(app, eps, mockCard)
+        : emptyState(`No ${filterOptions.find((option) => option.value === selectedProtocol).label} mock servers yet`, 'Choose another protocol filter or create a new mock server.')
+      : emptyState('No mock servers yet', 'Choose a protocol to create your first mock server.'));
+}
+
+// A realtime inspector created before the unified navigation remains visible
+// here. Hiding it after removing the old WebSockets/GraphQL entries would
+// make a user-owned endpoint impossible to reach; new endpoints are always
+// created as mocks from the protocol picker.
+export function isMockServerEndpoint(endpoint) {
+  return endpoint && (endpoint.type === 'mock' || (endpoint.protocol || 'http') !== 'http');
+}
+
+function mockProtocolFilter(app, option, selectedProtocol) {
+  const selected = option.value === selectedProtocol;
+  const button = h('button', {
+    'aria-pressed': selected ? 'true' : 'false',
+    style: `display:inline-flex;align-items:center;gap:7px;background:${selected ? '#2f2820' : '#191712'};color:${selected ? '#f2ede3' : '#948d83'};border-radius:var(--radius-xs);padding:7px 10px;font-size:12px;font-weight:600;box-shadow:${selected ? 'inset 0 0 0 1px rgba(245,240,230,.1)' : 'inset 0 0 0 1px rgba(245,240,230,.04)'};cursor:pointer`,
+    onclick: () => app.setMockProtocolFilter(option.value),
+  }, option.label, h('span', { style: `font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:${selected ? '#cfc8bc' : '#6a655c'}` }, String(option.count)));
+  button.addEventListener('mouseenter', () => { if (!selected) button.style.background = '#211d17'; });
+  button.addEventListener('mouseleave', () => { if (!selected) button.style.background = '#191712'; });
+  return button;
+}
+
+export function mockProtocolPickerScreen(app) {
+  const choices = [
+    { protocol: 'http', title: 'HTTP API', detail: 'Routes, responses, auth, scenarios and callbacks.', icon: icons.mock, color: '#d69a3c', onPick: app.newMock },
+    { protocol: 'websocket', title: 'WebSocket', detail: 'Stateful RFC 6455 conversations with ordered scripts.', icon: icons.webhook, color: '#45ae85', onPick: () => app.newRealtime('websocket') },
+    { protocol: 'socketio', title: 'Socket.IO', detail: 'Events, acknowledgements, polling and WebSocket transport.', icon: icons.webhook, color: '#6a9fd4', onPick: () => app.newRealtime('socketio') },
+    { protocol: 'graphql', title: 'GraphQL', detail: 'SDL, deterministic fixtures and subscriptions.', icon: icons.layers, color: '#b28de0', onPick: () => app.newRealtime('graphql') },
+  ];
+  return h('div', { style: 'height:100%;overflow-y:auto' },
+    h('div', { style: 'max-width:860px;margin:0 auto;padding:34px 40px 64px' },
+      h('button', { style: 'display:flex;align-items:center;gap:7px;background:transparent;color:#8a837a;font-size:13px;font-weight:500;padding:0;margin-bottom:18px', onclick: app.navMocks }, raw(icons.chevLeft({ w: 16, sw: 1.9 })), 'Mock Servers'),
+      h('h1', { style: 'margin:0 0 6px;font-size:24px;font-weight:600;color:#f2ede3;letter-spacing:-.02em' }, 'New mock server'),
+      h('p', { style: 'margin:0 0 26px;font-size:13.5px;line-height:1.5;color:#8a837a;max-width:620px' }, 'Choose the protocol your client will call. You can configure behavior, security and test data after creating it.'),
+      h('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:13px' }, ...choices.map((choice) => mockProtocolChoice(choice)))
+    )
+  );
+}
+
+function mockProtocolChoice(choice) {
+  const card = h('button', { style: 'min-height:168px;display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#191712;border-radius:var(--radius-sm);padding:18px;box-shadow:inset 0 0 0 1px rgba(245,240,230,.05);cursor:pointer;transition:background .14s,transform .14s', onclick: choice.onPick },
+    h('span', { style: `width:36px;height:36px;border-radius:var(--radius-sm);background:#221d17;color:${choice.color};display:flex;align-items:center;justify-content:center;margin-bottom:16px` }, raw(choice.icon({ w: 18, sw: 1.8 }))),
+    h('span', { style: 'font-size:15px;font-weight:600;color:#efe9df' }, choice.title),
+    h('span', { style: 'font-size:12px;line-height:1.45;color:#8a837a;margin-top:5px' }, choice.detail),
+    h('span', { style: `display:flex;align-items:center;gap:5px;margin-top:auto;padding-top:14px;font-size:11.5px;font-weight:600;color:${choice.color}` }, 'Configure mock', raw(icons.chevRight({ w: 14, stroke: 'currentColor', sw: 2 }))));
+  card.addEventListener('mouseenter', () => { card.style.background = '#211d17'; card.style.transform = 'translateY(-1px)'; });
+  card.addEventListener('mouseleave', () => { card.style.background = '#191712'; card.style.transform = 'translateY(0)'; });
+  return card;
 }
 
 function listHeader(title, sub, action) {
-  return h('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px' },
+  return h('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px;flex-wrap:wrap' },
     h('div', {}, h('h1', { style: 'margin:0;font-size:26px;font-weight:600;color:#f2ede3;letter-spacing:-0.025em' }, title),
       h('p', { style: 'margin:7px 0 0 0;font-size:14px;color:#8a837a' }, sub)), action);
 }
@@ -253,6 +316,7 @@ function webhookCard(app, ep) {
 }
 
 function mockCard(app, ep) {
+  if ((ep.protocol || 'http') !== 'http') return realtimeMockCard(app, ep);
   const active = (ep.scenarios || []).find((x) => x.active) || (ep.scenarios || [])[0];
   const card = h('div', { style: 'background:#191712;border-radius:var(--radius-sm);padding:15px 12px 15px 16px;transition:background .14s' },
     h('div', { style: 'display:flex;align-items:center;gap:11px;margin-bottom:13px' },
@@ -265,6 +329,33 @@ function mockCard(app, ep) {
       h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#948d83;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, ep.path)),
     h('div', { style: 'display:flex;align-items:center;justify-content:space-between;cursor:pointer', onclick: () => app.openEndpoint(ep) },
       h('span', { style: 'font-size:12px;color:#8a837a' }, h('span', { style: 'color:#cfc8bc' }, String((ep.scenarios || []).length)), ' scenarios · active ', h('span', { style: 'color:#cfc8bc' }, active ? active.name : '—'))));
+  card.addEventListener('mouseenter', () => { card.style.background = '#1d1a14'; });
+  card.addEventListener('mouseleave', () => { card.style.background = '#191712'; });
+  return card;
+}
+
+function realtimeMockCard(app, ep) {
+  const protocol = ep.protocol || 'websocket';
+  const icon = protocol === 'graphql' ? icons.layers : icons.webhook;
+  const behavior = protocol === 'graphql'
+    ? 'HTTP operations + subscriptions'
+    : protocol === 'socketio'
+      ? 'Events · polling + WebSocket'
+      : 'Stateful message conversation';
+  const mode = ep.type === 'mock' ? 'Mock' : 'Inspector';
+  const card = h('div', { style: 'background:#191712;border-radius:var(--radius-sm);padding:15px 12px 15px 16px;transition:background .14s' },
+    h('div', { style: 'display:flex;align-items:center;gap:11px;margin-bottom:13px' },
+      h('span', { style: `width:32px;height:32px;border-radius:var(--radius-sm);background:#221d17;color:${protocolColor(protocol)};display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer`, onclick: () => app.openEndpoint(ep) }, raw(icon({ w: 17 }))),
+      h('div', { style: 'flex:1;min-width:0;cursor:pointer', onclick: () => app.openEndpoint(ep) },
+        h('div', { style: 'font-size:14.5px;font-weight:600;color:#efe9df;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, ep.name),
+        h('div', { style: 'font-size:10.5px;color:#7a746a;margin-top:2px' }, behavior)),
+      epKebab(app, ep)),
+    h('div', { style: 'display:flex;align-items:center;gap:8px;background:#141210;border-radius:var(--radius-xs);padding:8px 10px;margin:0 4px 13px 0;cursor:pointer', onclick: () => app.openEndpoint(ep) },
+      h('span', { style: `font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.06em;color:${protocolColor(protocol)}` }, protocolLabel(protocol).toUpperCase()),
+      h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#948d83;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, '/' + ep.slug)),
+    h('div', { style: 'display:flex;align-items:center;justify-content:space-between;cursor:pointer', onclick: () => app.openEndpoint(ep) },
+      h('span', { style: 'font-size:12px;color:#8a837a' }, mode, ' · ', ep.lastActivity ? `activity ${fmtRel(ep.lastActivity)}` : 'no activity yet'),
+      h('span', { style: `font-size:11.5px;font-weight:600;color:${ep.config && ep.config.auth && ep.config.auth.enabled ? '#b28de0' : '#7a746a'}` }, ep.config && ep.config.auth && ep.config.auth.enabled ? 'Protected' : 'Open')));
   card.addEventListener('mouseenter', () => { card.style.background = '#1d1a14'; });
   card.addEventListener('mouseleave', () => { card.style.background = '#191712'; });
   return card;

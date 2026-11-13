@@ -1,7 +1,8 @@
 // Mock server configuration + requests tab.
-import { h, raw, icons, kebabMenu, select, toggle, jsonEditor, hlJSON, fmtClock, fmtStamp, fmtBytes, methodColor, statusColor } from '../ui.js';
+import { h, raw, codeBlock, codeEditor, icons, kebabMenu, select, templateSuggestionsFor, toggle, fmtClock, fmtStamp, fmtBytes, methodColor, statusColor } from '../ui.js';
 import { endpointMenuItems } from './endpoint.js';
 import { authConfigured, credLabel } from './settings.js';
+import { deliveriesTab, eventEditorDialog, eventTestDialog, scenarioEventsPanel } from './async-events.js';
 
 const CT_OPTS = [
   { value: 'application/json', label: 'application/json' },
@@ -18,6 +19,12 @@ const OP_OPTS = [{ value: 'equals', label: 'equals' }, { value: 'contains', labe
 const METHOD_VALUE_OPTS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'QUERY'].map((m) => ({ value: m, label: m, color: methodColor(m) }));
 const KEY_PLACEHOLDER = { header: 'X-Test-Scenario', body: 'data.object.amount', query: 'user_id', method: '(not used for Method)', path: '(not used for Path)' };
 const WHEN_LABELS = { header: 'Header', body: 'Body field', query: 'Query param', method: 'Method', path: 'Path' };
+function contentLanguage(contentType) {
+  if (/json/i.test(contentType || '')) return 'json';
+  if (/xml/i.test(contentType || '')) return 'xml';
+  if (/html/i.test(contentType || '')) return 'html';
+  return 'text';
+}
 
 export function mockScreen(app) {
   const s = app.s, ep = s.activeEp;
@@ -43,12 +50,14 @@ export function mockScreen(app) {
         h('button', { title: 'Endpoint settings', style: 'display:flex;align-items:center;justify-content:center;background:#211d17;color:#a49c91;border-radius:var(--radius-xs);width:33px;height:33px;flex-shrink:0', onclick: app.navSettings }, raw(icons.gear({ w: 16, sw: 1.7 }))),
         kebabMenu({ open: app.s.dropdown === 'epmenu-' + ep.id, onToggle: () => app.setDropdown('epmenu-' + ep.id), onClose: () => app.closeDropdown(), items: endpointMenuItems(app, ep), size: 33, bg: '#211d17', hoverBg: '#282219' }))),
     h('div', { style: "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#948d83;background:#141210;border-radius:var(--radius-xs);padding:8px 12px;margin-bottom:22px;display:inline-block" }, (ep.urls.public || ep.urls.local)),
-    h('div', { style: 'display:flex;align-items:center;gap:22px;margin-bottom:24px;box-shadow:inset 0 -1px 0 rgba(245,240,230,0.06)' },
-      tabBtn('config', 'Configuration'), tabBtn('requests', 'Requests', ep.requestCount)));
+    h('div', { style: 'display:flex;align-items:center;gap:22px;margin-bottom:24px;box-shadow:inset 0 -1px 0 rgba(245,240,230,0.06);flex-wrap:wrap' },
+      tabBtn('config', 'Configuration'), tabBtn('requests', 'Requests', ep.requestCount), tabBtn('deliveries', 'Deliveries')));
 
-  const body = s.mockTab === 'config' ? configTab(app, ep, active) : requestsTab(app, ep);
+  const body = s.mockTab === 'config' ? configTab(app, ep, active) : s.mockTab === 'deliveries' ? deliveriesTab(app, ep) : requestsTab(app, ep);
 
-  return h('div', { style: 'height:100%;overflow-y:auto' }, h('div', { style: 'max-width:900px;margin:0 auto;padding:22px 28px 64px 28px' }, head, body));
+  return h('div', { style: 'height:100%;overflow-y:auto' },
+    h('div', { style: 'max-width:900px;margin:0 auto;padding:22px 28px 64px 28px' }, head, body),
+    eventEditorDialog(app), eventTestDialog(app));
 }
 
 function configTab(app, ep, active) {
@@ -128,6 +137,7 @@ function scenarioCard(app, ep, sc, i, sequential) {
   const card = h('div', { style: `background:#191712;border-radius:var(--radius-sm);overflow:hidden;box-shadow:${sc.active && !sequential ? 'inset 0 0 0 1px rgba(35,134,54,0.35)' : 'none'}` }, head);
   if (editing) {
     card.appendChild(scenarioEditForm(app));
+    card.appendChild(h('div', { style: 'padding:0 16px 16px' }, scenarioEventsPanel(app, sc)));
   } else if (expanded) {
     const headersArr = Object.entries(sc.headers || {});
     card.appendChild(h('div', { style: 'padding:2px 16px 16px 16px' },
@@ -136,22 +146,23 @@ function scenarioCard(app, ep, sc, i, sequential) {
         h('div', { style: 'background:#141210;border-radius:var(--radius-xs);padding:10px 12px' }, h('div', { style: 'font-size:10.5px;color:#6a655c;margin-bottom:4px' }, 'Artificial delay'), h('div', { style: "font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#c2bbb0" }, sc.delay ? sc.delay + 'ms' : 'none'))),
       headersArr.length ? h('div', {}, h('div', { style: 'font-size:10.5px;color:#6a655c;margin-bottom:6px' }, 'Response headers'),
         h('div', { style: 'background:#141210;border-radius:var(--radius-xs);padding:4px 0;margin-bottom:12px' }, ...headersArr.map(([k, v]) => h('div', { style: 'display:grid;grid-template-columns:200px 1fr;gap:12px;padding:6px 12px' }, h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#6a9fd4" }, k), h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#c2bbb0" }, String(v)))))) : null,
-      h('div', { style: 'font-size:10.5px;color:#6a655c;margin-bottom:6px' }, 'Response body'),
-      h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-xs);padding:13px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:#c2bbb0;overflow-x:auto;white-space:pre", html: hlJSON(sc.body || '') })));
+      codeBlock(sc.body || '', { language: contentLanguage(sc.contentType), label: 'Response body', style: "margin:0;background:#141210;border-radius:var(--radius-xs);padding:13px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" }),
+      scenarioEventsPanel(app, sc)));
   }
   return card;
 }
 
 function scenarioEditForm(app) {
   const s = app.s, es = s.editScenario;
+  const responseVariables = templateSuggestionsFor(app, 'mockResponse');
   return h('div', { style: 'padding:2px 16px 16px 16px' },
     h('div', { style: 'display:flex;flex-direction:column;gap:12px' },
       h('div', {}, fieldLabel('Name'), textInput(es.name, 'e.g. Rate limited', (v) => app.setEditScenario('name', v))),
       h('div', { style: 'display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:10px' },
         h('div', {}, fieldLabel('Status'), textInput(es.status, '', (v) => app.setEditScenario('status', v), true)),
         h('div', {}, fieldLabel('Delay (ms)'), textInput(es.delay, '', (v) => app.setEditScenario('delay', v), true)),
-        h('div', {}, fieldLabel('Content-Type'), select(app.selectHelper('scen-edit-ct', es.contentType, CT_OPTS, (v) => app.setEditScenario('contentType', v), { mono: true })))),
-      h('div', {}, fieldLabel('Response body'), jsonEditor(es.body, 5, (v) => app.setEditScenario('body', v))),
+        h('div', {}, fieldLabel('Content-Type'), select(app.selectHelper('scen-edit-ct', es.contentType, CT_OPTS, (v) => { app.setEditScenario('contentType', v); return true; }, { mono: true })))),
+      h('div', {}, fieldLabel('Response body'), codeEditor(es.body, 5, (v) => app.setEditScenario('body', v), { language: contentLanguage(es.contentType), templateSuggestions: responseVariables })),
       h('div', { style: 'display:flex;gap:8px' },
         h('button', { style: 'background:#edecec;color:#1a0e07;border-radius:var(--radius-xs);padding:9px 16px;font-size:13px;font-weight:600', onclick: app.saveEditScenario }, 'Save changes'),
         h('button', { style: 'background:#211d17;color:#a49c91;border-radius:var(--radius-xs);padding:9px 16px;font-size:13px;font-weight:600', onclick: app.cancelEditScenario }, 'Cancel'))));
@@ -164,6 +175,7 @@ function textInput(value, placeholder, onInput, mono) {
 
 function addScenarioForm(app) {
   const s = app.s, ns = s.newScenario;
+  const responseVariables = templateSuggestionsFor(app, 'mockResponse');
   return h('div', { style: 'background:#191712;border-radius:var(--radius-sm);padding:16px;animation:sd-in .14s ease' },
     h('div', { style: 'font-size:13.5px;font-weight:600;color:#e8e2d7;margin-bottom:14px' }, 'New scenario'),
     h('div', { style: 'display:flex;flex-direction:column;gap:12px' },
@@ -171,8 +183,8 @@ function addScenarioForm(app) {
       h('div', { style: 'display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:10px' },
         h('div', {}, fieldLabel('Status'), textInput(ns.status, '', (v) => app.setNewScenario('status', v), true)),
         h('div', {}, fieldLabel('Delay (ms)'), textInput(ns.delay, '', (v) => app.setNewScenario('delay', v), true)),
-        h('div', {}, fieldLabel('Content-Type'), select(app.selectHelper('scen-ct', ns.contentType, CT_OPTS, (v) => app.setNewScenario('contentType', v), { mono: true })))),
-      h('div', {}, fieldLabel('Response body'), jsonEditor(ns.body, 5, (v) => app.setNewScenario('body', v))),
+        h('div', {}, fieldLabel('Content-Type'), select(app.selectHelper('scen-ct', ns.contentType, CT_OPTS, (v) => { app.setNewScenario('contentType', v); return true; }, { mono: true })))),
+      h('div', {}, fieldLabel('Response body'), codeEditor(ns.body, 5, (v) => app.setNewScenario('body', v), { language: contentLanguage(ns.contentType), templateSuggestions: responseVariables })),
       h('div', { style: 'display:flex;gap:8px' },
         h('button', { style: 'background:#edecec;color:#1a0e07;border-radius:var(--radius-xs);padding:9px 16px;font-size:13px;font-weight:600', onclick: app.addScenario }, 'Add scenario'),
         h('button', { style: 'background:#211d17;color:#a49c91;border-radius:var(--radius-xs);padding:9px 16px;font-size:13px;font-weight:600', onclick: app.cancelAddScenario }, 'Cancel'))));
@@ -270,8 +282,8 @@ function mockReqDetail(app, r) {
   let content;
   if (s.mockReqTab === 'headers') content = kv(headersArr);
   else if (s.mockReqTab === 'query') content = queryArr.length ? kv(queryArr) : box('No query parameters on this request.');
-  else if (s.mockReqTab === 'response') content = h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow-x:auto;white-space:pre", html: hlJSON(r.responseBody || '') });
-  else content = r.body ? h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow-x:auto;white-space:pre", html: hlJSON(r.body) }) : box('No request body on this call.');
+  else if (s.mockReqTab === 'response') content = codeBlock(r.responseBody || '', { label: 'Response', style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" });
+  else content = r.body ? codeBlock(r.body, { label: 'Request body', style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:18px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.65;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere" }) : box('No request body on this call.');
   return h('div', { style: 'animation:sd-in .12s ease' },
     h('button', { style: 'display:flex;align-items:center;gap:7px;background:transparent;color:#8a837a;font-size:13px;font-weight:500;padding:0;margin-bottom:18px', onclick: app.backToMockReqs }, raw(icons.chevLeft({ w: 16, sw: 1.9 })), 'Back to requests'),
     h('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap' },

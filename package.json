@@ -1,9 +1,13 @@
 {
-  "name": "sidedoor",
+  "name": "gatewayips-tools-mock-server",
   "version": "1.0.0",
-  "description": "Local-first webhook inspector + API mock server with Tailscale Funnel. Zero dependencies.",
+  "description": "Sidedoor: a local-first webhook inspector, API mock server, and realtime protocol test harness.",
   "type": "module",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luby-fintech-br/GatewayIPS.Tools.MockServer.git"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
@@ -15,8 +19,16 @@
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
     "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
     "reset": "node --disable-warning=ExperimentalWarning src/seed.js --reset",
-    "test": "node --disable-warning=ExperimentalWarning --test"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "seed:oips-cielo-pix": "node --disable-warning=ExperimentalWarning src/seed-oips-cielo-pix.js"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "graphql": "^16.14.2",
+    "graphql-ws": "^6.2.0",
+    "socket.io": "^4.8.3",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
 }

@@ -9,6 +9,20 @@ import { defaultAuth, defaultHmac, defaultRate } from '../store.js';
 import { validateInspector, validateMock, isEmpty } from '../lib/validate.js';
 import { diffLines, diffSummary } from '../lib/diff.js';
 import { pretty } from '../lib/json.js';
+import { EVENT_LIMITS, EventConfigError, normalizeScenarioEvent } from '../lib/eventConfig.js';
+import { buildEventContext } from '../lib/eventTemplate.js';
+import { publicTemplateCatalog } from '../lib/templateCatalog.js';
+import {
+  REALTIME_PROTOCOLS,
+  RealtimeConfigError,
+  defaultRealtimeConfig,
+  normalizeGraphqlFixture,
+  normalizeRealtimeConfig,
+  normalizeRealtimeScript,
+  normalizeRealtimeStep,
+} from '../lib/realtime.js';
+import { compileGraphqlSchema, DEFAULT_GRAPHQL_SDL, GraphqlConfigError, validateGraphqlSdl } from '../lib/graphql.js';
+import { SOCKET_IO_PATH } from '../realtime-hub.js';
 
 // ---- URL helpers ----
 function baseUrls(ctx) {
@@ -19,14 +33,22 @@ function baseUrls(ctx) {
 }
 function epUrls(ctx, ep) {
   const { local, publicBase } = baseUrls(ctx);
-  return { local: `${local}/${ep.slug}`, public: publicBase ? `${publicBase}/${ep.slug}` : null };
+  const http = { local: `${local}/${ep.slug}`, public: publicBase ? `${publicBase}/${ep.slug}` : null };
+  const ws = (url) => url ? url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:') : null;
+  return {
+    ...http,
+    websocket: { local: ws(http.local), public: ws(http.public) },
+    graphql: { httpLocal: http.local, httpPublic: http.public, wsLocal: ws(http.local), wsPublic: ws(http.public) },
+    socketio: { path: SOCKET_IO_PATH, namespace: `/${ep.slug}`, local: local, public: publicBase },
+  };
 }
 function presentEndpoint(ctx, ep) {
   if (!ep) return null;
   return {
-    id: ep.id, type: ep.type, name: ep.name, slug: ep.slug,
+    id: ep.id, type: ep.type, protocol: ep.protocol || 'http', name: ep.name, slug: ep.slug,
     workspaceId: ep.workspace_id, projectId: ep.project_id, project: ep.project,
-    method: ep.method, path: ep.path, mode: ep.mode, forwardTarget: ep.forward_target,
+    method: ep.method, path: ep.path, pathMode: ep.path_mode || 'exact', allowedMethods: (() => { try { return ep.allowed_methods ? JSON.parse(ep.allowed_methods) : null; } catch { return null; } })(),
+    mode: ep.mode, forwardTarget: ep.forward_target,
     config: ep.config, signed: !!ep.config.hmac.enabled, provider: ep.config.hmac.provider,
     createdAt: ep.created_at, lastActivity: ep.last_activity, requestCount: ep.request_count,
     scenarios: ep.scenarios || undefined, matchRules: ep.matchRules || undefined,
@@ -59,6 +81,135 @@ function download(res, filename, data) {
   res.end(data);
 }
 
+function normalizedEventOrThrow(body, current) {
+  try {
+    return normalizeScenarioEvent(body, current);
+  } catch (error) {
+    if (error instanceof EventConfigError) throw new ApiError(400, error.message, error.field ? { [error.field]: error.message } : undefined);
+    throw error;
+  }
+}
+
+function realtimeConfigOrThrow(value, current) {
+  try { return normalizeRealtimeConfig(value, current); }
+  catch (error) {
+    if (error instanceof RealtimeConfigError) throw new ApiError(400, error.message, error.field ? { [error.field]: error.message } : undefined);
+    throw error;
+  }
+}
+
+function realtimeScriptOrThrow(value, current) {
+  try { return normalizeRealtimeScript(value, current); }
+  catch (error) {
+    if (error instanceof RealtimeConfigError) throw new ApiError(400, error.message, error.field ? { [error.field]: error.message } : undefined);
+    throw error;
+  }
+}
+
+function realtimeStepOrThrow(value, current) {
+  try { return normalizeRealtimeStep(value, current); }
+  catch (error) {
+    if (error instanceof RealtimeConfigError) throw new ApiError(400, error.message, error.field ? { [error.field]: error.message } : undefined);
+    throw error;
+  }
+}
+
+function graphqlFixtureOrThrow(value, current) {
+  try { return normalizeGraphqlFixture(value, current); }
+  catch (error) {
+    if (error instanceof RealtimeConfigError) throw new ApiError(400, error.message, error.field ? { [error.field]: error.message } : undefined);
+    throw error;
+  }
+}
+
+function graphqlSchemaOrThrow(sdl) {
+  try { compileGraphqlSchema(sdl); return String(sdl); }
+  catch (error) {
+    if (error instanceof GraphqlConfigError) throw new ApiError(400, error.message, { sdl: error.message });
+    throw error;
+  }
+}
+
+function assertRealtimeEndpoint(ep) {
+  if (!ep || !REALTIME_PROTOCOLS.has(ep.protocol)) throw new ApiError(400, 'Not a realtime endpoint');
+  return ep;
+}
+
+function initialAuth(body) {
+  if (body.auth && typeof body.auth === 'object' && !Array.isArray(body.auth)) return { ...defaultAuth(), ...body.auth };
+  const auth = defaultAuth();
+  if (!body.auth || body.auth === 'none') return auth;
+  auth.enabled = true;
+  auth.method = body.auth;
+  if (body.auth === 'bearer' || body.auth === 'apikey') auth.token = body.authToken ? String(body.authToken) : '';
+  if (body.auth === 'apikey') {
+    if (body.authApiKeyName) auth.apiKeyName = String(body.authApiKeyName);
+    if (body.authApiKeyLoc === 'query' || body.authApiKeyLoc === 'header') auth.apiKeyLoc = body.authApiKeyLoc;
+  }
+  if (body.auth === 'basic') {
+    auth.user = body.authUser ? String(body.authUser) : '';
+    auth.pass = body.authPass ? String(body.authPass) : '';
+  }
+  return auth;
+}
+
+function createRealtimeEndpoint(ctx, body, workspaceId) {
+  const store = ctx.store;
+  const protocol = String(body.protocol || '').toLowerCase();
+  if (!REALTIME_PROTOCOLS.has(protocol)) throw new ApiError(400, 'Unsupported realtime protocol', { protocol: 'Choose WebSocket, Socket.IO, or GraphQL' });
+  const type = body.type === 'mock' ? 'mock' : body.type === 'inspector' ? 'inspector' : null;
+  if (!type) throw new ApiError(400, 'Endpoint type must be inspector or mock', { type: 'Choose Inspector or Mock' });
+  const slug = uniqueSlug(store, body.slug ? slugify(body.slug) : slugify(body.name) || newId(protocol));
+  const errors = validateInspector({ name: body.name, slug }, store.allSlugs());
+  if (!isEmpty(errors)) throw new ApiError(400, 'Validation failed', errors);
+  const sdl = protocol === 'graphql' ? graphqlSchemaOrThrow(body.sdl == null ? DEFAULT_GRAPHQL_SDL : body.sdl) : null;
+  const projectId = resolveProject(store, workspaceId, body);
+  const config = {
+    auth: initialAuth(body),
+    hmac: { ...defaultHmac(), ...(body.hmac && typeof body.hmac === 'object' ? body.hmac : {}) },
+    rate: { ...defaultRate(), ...(body.rate && typeof body.rate === 'object' ? body.rate : {}) },
+    realtime: realtimeConfigOrThrow(body.realtime || defaultRealtimeConfig()),
+    rules: [], ruleMatch: 'all',
+  };
+  const id = store.createEndpoint({ workspaceId, projectId, type, protocol, name: String(body.name).trim(), slug, config });
+  if (sdl != null) store.setGraphqlSchema(id, sdl);
+  return presentEndpoint(ctx, store.getEndpoint(id));
+}
+
+function fixtureBody(value) {
+  if (value == null) return '';
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function fixtureObject(value, field) {
+  if (value == null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw new ApiError(400, `${field} must be an object`, { [field]: 'Must be an object' });
+  return value;
+}
+
+function manualEventContext(fixture, scenario, endpoint) {
+  const root = fixture && typeof fixture === 'object' ? fixture : {};
+  const request = fixtureObject(root.request, 'request');
+  const response = fixtureObject(root.response, 'response');
+  const requestBody = fixtureBody(request.body);
+  const responseBody = fixtureBody(response.body == null ? scenario.body : response.body);
+  return buildEventContext({
+    request: {
+      method: request.method || endpoint.method || 'POST',
+      path: request.path || `/${endpoint.slug}`,
+      subpath: request.subpath || request.path || '/',
+      headers: fixtureObject(request.headers, 'request.headers'),
+      query: fixtureObject(request.query, 'request.query'),
+      body: requestBody,
+    },
+    response: {
+      status: response.status == null ? scenario.status : Number(response.status),
+      headers: response.headers == null ? scenario.headers : fixtureObject(response.headers, 'response.headers'),
+      body: responseBody,
+    },
+  });
+}
+
 export function createApiRouter() {
   const r = new Router();
 
@@ -73,6 +224,7 @@ export function createApiRouter() {
       counts: store.counts(activeWs),
       funnel: store.getFunnel(),
       baseUrls: baseUrls(ctx),
+      templateCatalog: publicTemplateCatalog(),
     };
   });
 
@@ -130,7 +282,7 @@ export function createApiRouter() {
   // ---------- endpoints ----------
   r.get('/endpoints', ({ ctx, query }) => {
     const workspaceId = query.workspace || ctx.store.getActiveWorkspace();
-    const eps = ctx.store.listEndpoints({ workspaceId, type: query.type });
+    const eps = ctx.store.listEndpoints({ workspaceId, type: query.type, protocol: query.protocol });
     return eps.map((e) => presentEndpoint(ctx, e));
   });
 
@@ -138,6 +290,8 @@ export function createApiRouter() {
     const store = ctx.store;
     const workspaceId = body.workspaceId || store.getActiveWorkspace();
     if (!store.getWorkspace(workspaceId)) throw new ApiError(400, 'Unknown workspace');
+    const protocol = body.protocol == null ? 'http' : String(body.protocol).toLowerCase();
+    if (protocol !== 'http') return createRealtimeEndpoint(ctx, body, workspaceId);
 
     if (body.type === 'mock') {
       const errors = validateMock(
@@ -168,7 +322,8 @@ export function createApiRouter() {
       const projectId = resolveProject(store, workspaceId, body);
       const id = store.createEndpoint({
         workspaceId, projectId, type: 'mock', name: String(body.name).trim(), slug,
-        method: body.method || 'POST', path: body.path, mode: 'single',
+        method: body.method || 'POST', path: body.path, pathMode: body.pathMode || 'exact',
+        allowedMethods: body.allowedMethods || null, mode: 'single',
         config: { auth, hmac: defaultHmac(), rate: defaultRate(), rules: [], ruleMatch: 'all' },
       });
       store.addScenario(id, {
@@ -214,6 +369,11 @@ export function createApiRouter() {
     const cur = store.getEndpoint(params.id);
     if (!cur) throw new ApiError(404, 'Endpoint not found');
     const patch = { ...body };
+    const nextProtocol = body.protocol == null ? cur.protocol : String(body.protocol).toLowerCase();
+    if (nextProtocol !== 'http' && !REALTIME_PROTOCOLS.has(nextProtocol)) throw new ApiError(400, 'Unsupported protocol', { protocol: 'Unsupported protocol' });
+    if (body.protocol != null) patch.protocol = nextProtocol;
+    if (body.realtime != null) patch.realtime = realtimeConfigOrThrow(body.realtime, cur.config.realtime);
+    if (body.sdl != null && nextProtocol !== 'graphql') throw new ApiError(400, 'SDL is only available for GraphQL endpoints', { sdl: 'Endpoint is not GraphQL' });
     if (body.slug != null) {
       const slug = slugify(body.slug);
       if (!slug) throw new ApiError(400, 'Invalid slug', { slug: 'A slug is required' });
@@ -221,14 +381,144 @@ export function createApiRouter() {
       patch.slug = slug;
     }
     if (body.projectName && !body.projectId) patch.projectId = resolveProject(store, cur.workspace_id, body);
+    if (nextProtocol !== cur.protocol && ctx.realtime && ctx.realtime.disconnectEndpoint) ctx.realtime.disconnectEndpoint(params.id, 'protocol_changed');
     store.updateEndpoint(params.id, patch);
+    if (nextProtocol === 'graphql' && (body.sdl != null || cur.protocol !== 'graphql')) {
+      const sdl = graphqlSchemaOrThrow(body.sdl == null ? DEFAULT_GRAPHQL_SDL : body.sdl);
+      store.setGraphqlSchema(params.id, sdl);
+    }
     return presentEndpoint(ctx, store.getEndpoint(params.id));
   });
 
   r.delete('/endpoints/:id', ({ ctx, params }) => {
     if (!ctx.store.getRawEndpoint(params.id)) throw new ApiError(404, 'Endpoint not found');
+    if (ctx.realtime && ctx.realtime.disconnectEndpoint) ctx.realtime.disconnectEndpoint(params.id, 'endpoint_deleted');
     ctx.store.deleteEndpoint(params.id);
     return { ok: true };
+  });
+
+  // ---------- realtime sessions ----------
+  r.get('/endpoints/:id/realtime-sessions', ({ ctx, params, query }) => {
+    assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    return ctx.store.listRealtimeSessions({ endpointId: params.id, state: query.state, limit: query.limit });
+  });
+  r.get('/realtime-sessions/:id', ({ ctx, params }) => {
+    const session = ctx.store.getRealtimeSession(params.id, { details: true });
+    if (!session) throw new ApiError(404, 'Realtime session not found');
+    return session;
+  });
+  r.post('/realtime-sessions/:id/disconnect', ({ ctx, params }) => {
+    const current = ctx.store.getRealtimeSession(params.id);
+    if (!current) throw new ApiError(404, 'Realtime session not found');
+    const session = ctx.realtime && ctx.realtime.disconnect
+      ? ctx.realtime.disconnect(params.id)
+      : ctx.store.closeRealtimeSession(params.id, { code: 1001, reason: 'admin_disconnect' });
+    return session;
+  });
+  r.delete('/endpoints/:id/realtime-sessions', ({ ctx, params }) => {
+    assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (ctx.realtime && ctx.realtime.disconnectEndpoint) ctx.realtime.disconnectEndpoint(params.id, 'history_cleared');
+    ctx.store.clearRealtimeSessions(params.id);
+    return { ok: true };
+  });
+  r.post('/endpoints/:id/realtime-test', async ({ ctx, params, body }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (!ctx.realtime || !ctx.realtime.runTest) throw new ApiError(503, 'Realtime runtime is unavailable');
+    return ctx.realtime.runTest(endpoint, body);
+  });
+
+  // ---------- WebSocket / Socket.IO mock scripts ----------
+  r.get('/endpoints/:id/realtime-scripts', ({ ctx, params }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.type !== 'mock' || endpoint.protocol === 'graphql') throw new ApiError(400, 'Scripts are available for WebSocket and Socket.IO mocks only');
+    return ctx.store.listRealtimeScripts(params.id);
+  });
+  r.post('/endpoints/:id/realtime-scripts', ({ ctx, params, body }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.type !== 'mock' || endpoint.protocol === 'graphql') throw new ApiError(400, 'Scripts are available for WebSocket and Socket.IO mocks only');
+    return ctx.store.addRealtimeScript(params.id, realtimeScriptOrThrow(body));
+  });
+  r.patch('/realtime-scripts/:id', ({ ctx, params, body }) => {
+    const current = ctx.store.getRealtimeScript(params.id);
+    if (!current) throw new ApiError(404, 'Realtime script not found');
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(current.endpointId));
+    if (endpoint.type !== 'mock' || endpoint.protocol === 'graphql') throw new ApiError(400, 'Scripts are unavailable for this endpoint');
+    return ctx.store.updateRealtimeScript(params.id, realtimeScriptOrThrow(body, current));
+  });
+  r.delete('/realtime-scripts/:id', ({ ctx, params }) => {
+    if (!ctx.store.getRealtimeScript(params.id)) throw new ApiError(404, 'Realtime script not found');
+    ctx.store.deleteRealtimeScript(params.id);
+    return { ok: true };
+  });
+  r.post('/realtime-scripts/:id/move', ({ ctx, params, body }) => {
+    if (body.direction !== 'up' && body.direction !== 'down') throw new ApiError(400, 'direction must be "up" or "down"');
+    const script = ctx.store.moveRealtimeScript(params.id, body.direction);
+    if (!script) throw new ApiError(404, 'Realtime script not found');
+    return script;
+  });
+  r.post('/realtime-scripts/:id/steps', ({ ctx, params, body }) => {
+    const script = ctx.store.getRealtimeScript(params.id);
+    if (!script) throw new ApiError(404, 'Realtime script not found');
+    return ctx.store.addRealtimeStep(params.id, realtimeStepOrThrow(body));
+  });
+  r.patch('/realtime-steps/:id', ({ ctx, params, body }) => {
+    const current = ctx.store.getRealtimeStep(params.id);
+    if (!current) throw new ApiError(404, 'Realtime script step not found');
+    return ctx.store.updateRealtimeStep(params.id, realtimeStepOrThrow(body, current));
+  });
+  r.delete('/realtime-steps/:id', ({ ctx, params }) => {
+    if (!ctx.store.getRealtimeStep(params.id)) throw new ApiError(404, 'Realtime script step not found');
+    ctx.store.deleteRealtimeStep(params.id);
+    return { ok: true };
+  });
+  r.post('/realtime-steps/:id/move', ({ ctx, params, body }) => {
+    if (body.direction !== 'up' && body.direction !== 'down') throw new ApiError(400, 'direction must be "up" or "down"');
+    const step = ctx.store.moveRealtimeStep(params.id, body.direction);
+    if (!step) throw new ApiError(404, 'Realtime script step not found');
+    return step;
+  });
+
+  // ---------- GraphQL schema and fixtures ----------
+  r.post('/graphql/validate', ({ body }) => {
+    const result = validateGraphqlSdl(body.sdl);
+    if (result.valid) return { valid: true };
+    return { valid: false, message: result.message, line: result.line, column: result.column };
+  });
+  r.get('/endpoints/:id/graphql/schema', ({ ctx, params }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.protocol !== 'graphql') throw new ApiError(400, 'Not a GraphQL endpoint');
+    return ctx.store.getGraphqlSchema(params.id);
+  });
+  r.put('/endpoints/:id/graphql/schema', ({ ctx, params, body }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.protocol !== 'graphql') throw new ApiError(400, 'Not a GraphQL endpoint');
+    return ctx.store.setGraphqlSchema(params.id, graphqlSchemaOrThrow(body.sdl));
+  });
+  r.get('/endpoints/:id/graphql/fixtures', ({ ctx, params }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.protocol !== 'graphql') throw new ApiError(400, 'Not a GraphQL endpoint');
+    return ctx.store.listGraphqlFixtures(params.id);
+  });
+  r.post('/endpoints/:id/graphql/fixtures', ({ ctx, params, body }) => {
+    const endpoint = assertRealtimeEndpoint(ctx.store.getEndpoint(params.id));
+    if (endpoint.protocol !== 'graphql') throw new ApiError(400, 'Not a GraphQL endpoint');
+    return ctx.store.addGraphqlFixture(params.id, graphqlFixtureOrThrow(body));
+  });
+  r.patch('/graphql-fixtures/:id', ({ ctx, params, body }) => {
+    const current = ctx.store.getGraphqlFixture(params.id);
+    if (!current) throw new ApiError(404, 'GraphQL fixture not found');
+    return ctx.store.updateGraphqlFixture(params.id, graphqlFixtureOrThrow(body, current));
+  });
+  r.delete('/graphql-fixtures/:id', ({ ctx, params }) => {
+    if (!ctx.store.getGraphqlFixture(params.id)) throw new ApiError(404, 'GraphQL fixture not found');
+    ctx.store.deleteGraphqlFixture(params.id);
+    return { ok: true };
+  });
+  r.post('/graphql-fixtures/:id/move', ({ ctx, params, body }) => {
+    if (body.direction !== 'up' && body.direction !== 'down') throw new ApiError(400, 'direction must be "up" or "down"');
+    const fixture = ctx.store.moveGraphqlFixture(params.id, body.direction);
+    if (!fixture) throw new ApiError(404, 'GraphQL fixture not found');
+    return fixture;
   });
 
   // ---------- scenarios ----------
@@ -248,6 +538,73 @@ export function createApiRouter() {
     if (!sc) throw new ApiError(404, 'Scenario not found');
     ctx.store.activateScenario(sc.endpointId, params.id);
     return { ok: true };
+  });
+
+  // ---------- scenario async events ----------
+  r.get('/scenarios/:id/events', ({ ctx, params }) => {
+    if (!ctx.store.getScenario(params.id)) throw new ApiError(404, 'Scenario not found');
+    return ctx.store.listScenarioEvents(params.id);
+  });
+  r.post('/scenarios/:id/events', ({ ctx, params, body }) => {
+    const scenario = ctx.store.getScenario(params.id);
+    if (!scenario) throw new ApiError(404, 'Scenario not found');
+    if (ctx.store.listScenarioEvents(params.id).length >= EVENT_LIMITS.maxEventsPerScenario) {
+      throw new ApiError(400, `A scenario can have at most ${EVENT_LIMITS.maxEventsPerScenario} async events`);
+    }
+    const event = ctx.store.addScenarioEvent(params.id, normalizedEventOrThrow(body));
+    return event;
+  });
+  r.patch('/scenario-events/:id', ({ ctx, params, body }) => {
+    const current = ctx.store.getScenarioEvent(params.id);
+    if (!current) throw new ApiError(404, 'Async event not found');
+    const event = ctx.store.updateScenarioEvent(params.id, normalizedEventOrThrow(body, current));
+    if (ctx.dispatcher) ctx.dispatcher.wake();
+    return event;
+  });
+  r.delete('/scenario-events/:id', ({ ctx, params }) => {
+    if (!ctx.store.getScenarioEvent(params.id)) throw new ApiError(404, 'Async event not found');
+    ctx.store.deleteScenarioEvent(params.id);
+    if (ctx.dispatcher) ctx.dispatcher.wake();
+    return { ok: true };
+  });
+  r.post('/scenario-events/:id/move', ({ ctx, params, body }) => {
+    if (body.direction !== 'up' && body.direction !== 'down') throw new ApiError(400, 'direction must be "up" or "down"');
+    const event = ctx.store.moveScenarioEvent(params.id, body.direction);
+    if (!event) throw new ApiError(404, 'Async event not found');
+    return event;
+  });
+  r.post('/scenarios/:id/event-runs/test', ({ ctx, params, body }) => {
+    const scenario = ctx.store.getScenario(params.id);
+    if (!scenario) throw new ApiError(404, 'Scenario not found');
+    const endpoint = ctx.store.getRawEndpoint(scenario.endpointId);
+    if (!endpoint || endpoint.type !== 'mock') throw new ApiError(400, 'Scenario is not attached to a mock endpoint');
+    const events = ctx.store.listScenarioEvents(scenario.id).filter((event) => event.enabled);
+    if (!events.length) throw new ApiError(409, 'Enable at least one async event before running a test flow');
+    const run = ctx.store.createEventRun({
+      endpointId: endpoint.id, scenarioId: scenario.id, source: 'test', events,
+      context: manualEventContext(body, scenario, endpoint),
+    });
+    ctx.events.broadcast('delivery', { endpointId: endpoint.id, run });
+    if (ctx.dispatcher) ctx.dispatcher.wake();
+    return run;
+  });
+
+  // ---------- async delivery history ----------
+  r.get('/endpoints/:id/event-runs', ({ ctx, params, query }) => {
+    if (!ctx.store.getRawEndpoint(params.id)) throw new ApiError(404, 'Endpoint not found');
+    return ctx.store.listEventRuns({ endpointId: params.id, status: query.status, source: query.source, limit: query.limit });
+  });
+  r.get('/event-runs/:id', ({ ctx, params }) => {
+    const run = ctx.store.getEventRun(params.id, { details: true });
+    if (!run) throw new ApiError(404, 'Delivery run not found');
+    return run;
+  });
+  r.post('/event-runs/:id/cancel', ({ ctx, params }) => {
+    const run = ctx.store.cancelEventRun(params.id);
+    if (!run) throw new ApiError(404, 'Delivery run not found');
+    if (ctx.dispatcher) ctx.dispatcher.cancelRun(params.id);
+    ctx.events.broadcast('delivery', { endpointId: run.endpointId, run: ctx.store.getEventRun(params.id) });
+    return run;
   });
 
   // ---------- match rules ----------

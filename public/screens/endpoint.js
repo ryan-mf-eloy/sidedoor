@@ -22,7 +22,9 @@ export function errline(msg) { return msg ? h('div', { style: 'display:flex;alig
 export function endpointEditor(app) {
   const e = app.s.epEditor;
   if (!e) return h('div', {});
-  const isMock = e.type === 'mock';
+  const isRealtime = (e.protocol || 'http') !== 'http';
+  const isMock = e.type === 'mock' && !isRealtime;
+  const protocolLabel = e.protocol === 'graphql' ? 'GraphQL endpoint' : e.protocol === 'socketio' ? 'Socket.IO endpoint' : e.protocol === 'websocket' ? 'WebSocket endpoint' : null;
   const err = e.error || {};
 
   const fields = [
@@ -37,14 +39,14 @@ export function endpointEditor(app) {
   } else {
     fields.push(h('div', { style: 'margin-top:15px' }, label('Slug'), input(e.slug, 'stripe-prod', (v) => { e.slug = slugify(v); const el = document.getElementById('ep-edit-slug-preview'); if (el) el.textContent = `${(app.s.baseUrls.local || '')}/${e.slug || 'your-slug'}`; }, err.slug, { mono: true }), errline(err.slug),
       h('div', { id: 'ep-edit-slug-preview', style: "margin-top:8px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8a837a" }, `${(app.s.baseUrls.local || '')}/${e.slug || 'your-slug'}`)));
-    fields.push(h('div', { style: 'margin-top:15px' }, label('Forward target (optional)'), input(e.forwardTarget, 'http://localhost:3000/webhook', (v) => { e.forwardTarget = v; }, null, { mono: true }),
+    if (!isRealtime) fields.push(h('div', { style: 'margin-top:15px' }, label('Forward target (optional)'), input(e.forwardTarget, 'http://localhost:3000/webhook', (v) => { e.forwardTarget = v; }, null, { mono: true }),
       h('div', { style: 'font-size:11.5px;color:#6a655c;margin-top:8px' }, 'Where "Forward to local" rules relay requests.')));
   }
 
   return scrim(90, 452, app.cancelEpEditor,
     h('div', { style: 'display:flex;align-items:center;gap:13px;margin-bottom:20px' },
-      h('span', { style: `width:34px;height:34px;border-radius:var(--radius-sm);background:#221d17;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${isMock ? '#d69a3c' : '#238636'}` }, raw((isMock ? icons.mock : icons.webhook)({ w: 18 }))),
-      h('div', { style: 'flex:1;min-width:0' }, h('div', { style: 'font-size:16.5px;font-weight:600;color:#f4efe6;letter-spacing:-0.01em' }, isMock ? 'Edit mock server' : 'Edit webhook'), h('div', { style: 'font-size:12px;color:#7a746a;margin-top:2px' }, 'Update its details')),
+      h('span', { style: `width:34px;height:34px;border-radius:var(--radius-sm);background:#221d17;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${isMock ? '#d69a3c' : isRealtime ? '#b28de0' : '#238636'}` }, raw((isMock ? icons.mock : icons.webhook)({ w: 18 }))),
+      h('div', { style: 'flex:1;min-width:0' }, h('div', { style: 'font-size:16.5px;font-weight:600;color:#f4efe6;letter-spacing:-0.01em' }, isMock ? 'Edit mock server' : isRealtime ? `Edit ${protocolLabel}` : 'Edit webhook'), h('div', { style: 'font-size:12px;color:#7a746a;margin-top:2px' }, 'Update its details')),
       h('button', { title: 'Close', style: 'width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-sm);background:transparent;color:#6a655c;cursor:pointer;flex-shrink:0', onclick: app.cancelEpEditor }, raw(icons.x({ w: 16, sw: 1.9 })))),
     ...fields,
     h('div', { style: 'display:flex;gap:9px;margin-top:23px' },
@@ -55,14 +57,16 @@ export function endpointEditor(app) {
 export function endpointDeleteConfirm(app) {
   const t = app.s.epConfirmDelete;
   if (!t) return h('div', {});
-  const isMock = t.type === 'mock';
+  const isRealtime = (t.protocol || 'http') !== 'http';
+  const isMock = t.type === 'mock' && !isRealtime;
+  const noun = isRealtime ? (t.protocol === 'graphql' ? 'GraphQL endpoint' : 'realtime endpoint') : isMock ? 'mock server' : 'webhook';
   return scrim(92, 404, app.cancelDeleteEp,
     h('div', { style: 'display:flex;align-items:center;gap:13px;margin-bottom:15px' },
       h('span', { style: 'width:40px;height:40px;border-radius:var(--radius-md);background:rgba(207,139,127,0.14);display:flex;align-items:center;justify-content:center;flex-shrink:0' }, raw(icons.trash({ w: 20, stroke: '#e08b7f', sw: 1.9 }))),
-      h('div', { style: 'flex:1;min-width:0' }, h('div', { style: 'font-size:16.5px;font-weight:600;color:#f4efe6;letter-spacing:-0.01em' }, isMock ? 'Delete mock server?' : 'Delete webhook?'), h('div', { style: 'font-size:12px;color:#7a746a;margin-top:2px' }, "This can't be undone"))),
-    h('div', { style: 'font-size:13.5px;line-height:1.5;color:#b8b0a4;padding:2px 1px 0' }, "You're about to delete ", h('span', { style: 'color:#f2ede3;font-weight:600' }, t.name), isMock ? ' and all of its scenarios, rules and captured requests.' : ' and all of its captured requests and settings.'),
+      h('div', { style: 'flex:1;min-width:0' }, h('div', { style: 'font-size:16.5px;font-weight:600;color:#f4efe6;letter-spacing:-0.01em' }, `Delete ${noun}?`), h('div', { style: 'font-size:12px;color:#7a746a;margin-top:2px' }, "This can't be undone"))),
+    h('div', { style: 'font-size:13.5px;line-height:1.5;color:#b8b0a4;padding:2px 1px 0' }, "You're about to delete ", h('span', { style: 'color:#f2ede3;font-weight:600' }, t.name), isRealtime ? ' and all of its schemas, scripts, fixtures and session history.' : isMock ? ' and all of its scenarios, rules and captured requests.' : ' and all of its captured requests and settings.'),
     h('div', { style: 'display:flex;gap:9px;margin-top:22px' },
-      h('button', { style: 'flex:1;display:flex;align-items:center;justify-content:center;gap:7px;background:#c8574a;color:#fdeeec;border-radius:var(--radius-sm);padding:11px;font-size:13.5px;font-weight:600;cursor:pointer', onclick: app.confirmDeleteEp }, raw(icons.trash({ w: 15, sw: 1.9 })), isMock ? 'Delete mock' : 'Delete webhook'),
+      h('button', { style: 'flex:1;display:flex;align-items:center;justify-content:center;gap:7px;background:#c8574a;color:#fdeeec;border-radius:var(--radius-sm);padding:11px;font-size:13.5px;font-weight:600;cursor:pointer', onclick: app.confirmDeleteEp }, raw(icons.trash({ w: 15, sw: 1.9 })), isRealtime ? 'Delete endpoint' : isMock ? 'Delete mock' : 'Delete webhook'),
       h('button', { style: 'display:flex;align-items:center;justify-content:center;background:#211d17;color:#a49c91;border-radius:var(--radius-sm);padding:11px 18px;font-size:13.5px;font-weight:600;cursor:pointer', onclick: app.cancelDeleteEp }, 'Cancel')));
 }
 

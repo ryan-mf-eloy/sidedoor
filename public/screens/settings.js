@@ -1,5 +1,5 @@
 // Endpoint settings: Authentication, HMAC verification, Forwarding rules, Rate limiting.
-import { h, raw, clear, icons, select, segment, toggle, fmtClock } from '../ui.js';
+import { h, raw, clear, codeBlock, codeEditor, icons, select, segment, toggle, fmtClock } from '../ui.js';
 
 const AUTH_METHODS = [{ value: 'none', label: 'None — public' }, { value: 'apikey', label: 'API key' }, { value: 'bearer', label: 'Bearer token' }, { value: 'basic', label: 'Basic auth' }];
 const PROVIDERS = [{ value: 'stripe', label: 'Stripe' }, { value: 'github', label: 'GitHub' }, { value: 'shopify', label: 'Shopify' }, { value: 'twilio', label: 'Twilio' }, { value: 'slack', label: 'Slack' }, { value: 'custom', label: 'Custom HMAC' }];
@@ -75,7 +75,7 @@ function toggleHeader(iconFn, iconColor, title, sub, on, onClick) {
 export function settingsScreen(app) {
   const s = app.s, ep = s.activeEp;
   if (!ep) return h('div', {});
-  const tabs = ep.type === 'mock' ? [['auth', 'Authentication'], ['rate', 'Rate limiting']] : [['auth', 'Authentication'], ['hmac', 'HMAC verification'], ['rules', 'Forwarding rules'], ['rate', 'Rate limiting']];
+  const tabs = settingsTabs(ep);
 
   const tabBar = h('div', { style: 'display:flex;align-items:center;gap:24px;margin-bottom:26px;box-shadow:inset 0 -1px 0 #241f19' },
     ...tabs.map(([id, lbl]) => h('button', { style: `background:transparent;padding:0 0 12px 0;font-size:13.5px;font-weight:600;color:${s.settingsTab === id ? '#f2ede3' : '#8a837a'};box-shadow:${s.settingsTab === id ? 'inset 0 -2px 0 #edecec' : 'none'}`, onclick: () => app.setSettingsTab(id) }, lbl)));
@@ -91,6 +91,18 @@ export function settingsScreen(app) {
     h('h1', { style: 'margin:0 0 4px 0;font-size:23px;font-weight:600;color:#f2ede3;letter-spacing:-0.02em' }, 'Endpoint settings'),
     h('p', { style: 'margin:0 0 20px 0;font-size:13.5px;color:#8a837a' }, 'Configuration for ', h('span', { style: 'color:#c9c2b6;font-weight:500' }, ep.name), '.'),
     tabBar, panel));
+}
+
+// GraphQL mocks receive HTTP requests as well as WebSocket subscriptions, so
+// they can verify the same request signatures as an HTTP endpoint. Raw
+// WebSocket and Socket.IO mocks intentionally keep HMAC out of their UI: a
+// generic per-frame signature mode is not supported.
+export function settingsTabs(ep) {
+  const tabs = [['auth', 'Authentication']];
+  if (ep.type !== 'mock' || ep.protocol === 'graphql') tabs.push(['hmac', 'HMAC verification']);
+  if (ep.type !== 'mock') tabs.push(['rules', 'Forwarding rules']);
+  tabs.push(['rate', 'Rate limiting']);
+  return tabs;
 }
 
 function authPanel(app, ep) {
@@ -116,7 +128,7 @@ function authPanel(app, ep) {
       kids.push(warnBanner(`No ${credLabel(a.method)} set yet — every request will be rejected (HTTP ${a.failStatus || 401}) until you fill it in below.`));
     }
     kids.push(sectionCard(methodSel, detail, reject));
-    kids.push(h('div', {}, label('Example request'), h('pre', { style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:14px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;color:#b3aca1;white-space:pre-wrap;word-break:break-all" }, authCurl(ep))));
+    kids.push(h('div', {}, label('Example request'), codeBlock(authCurl(ep), { language: 'shell', style: "margin:0;background:#141210;border-radius:var(--radius-sm);padding:14px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;color:#b3aca1;white-space:pre-wrap;word-break:break-all" })));
   }
   return h('div', { style: 'display:flex;flex-direction:column;gap:16px' }, ...kids);
 }
@@ -205,8 +217,8 @@ function cfgRuleRow(app, r, i) {
       h('span', { style: 'font-size:10.5px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:#5c574e;width:36px;flex-shrink:0' }, 'Then'),
       h('div', { style: 'flex:1;max-width:300px' }, select(app.selectHelper('cfgr-' + r.id + '-action', r.action, RULE_ACTIONS, (v) => app.updateCfgRule(r.id, 'action', v)))),
       r.action === 'respond' ? h('input', { value: r.respondStatus || '', placeholder: 'status', style: "width:80px;background:#17140e;border-radius:var(--radius-sm);padding:9px 12px;box-shadow:inset 0 0 0 1px rgba(245,240,230,0.12);color:#e8e2d7;font-family:'IBM Plex Mono',monospace;font-size:12.5px", oninput: (e) => app.updateCfgRule(r.id, 'respondStatus', e.target.value) }) : null),
-    r.action === 'respond' ? h('div', { style: 'margin-top:9px' }, h('input', { value: r.respondBody || '', placeholder: 'Response body (JSON)', style: "width:100%;background:#17140e;border-radius:var(--radius-sm);padding:9px 12px;box-shadow:inset 0 0 0 1px rgba(245,240,230,0.12);color:#e8e2d7;font-family:'IBM Plex Mono',monospace;font-size:12.5px", oninput: (e) => app.updateCfgRule(r.id, 'respondBody', e.target.value) })) : null,
-    r.action === 'transform' ? h('div', { style: 'margin-top:9px' }, h('input', { value: r.transform || '', placeholder: 'Replacement body forwarded downstream (JSON)', style: "width:100%;background:#17140e;border-radius:var(--radius-sm);padding:9px 12px;box-shadow:inset 0 0 0 1px rgba(245,240,230,0.12);color:#e8e2d7;font-family:'IBM Plex Mono',monospace;font-size:12.5px", oninput: (e) => app.updateCfgRule(r.id, 'transform', e.target.value) })) : null);
+    r.action === 'respond' ? h('div', { style: 'margin-top:9px' }, codeEditor(r.respondBody || '', 4, (value) => app.updateCfgRule(r.id, 'respondBody', value), { language: 'json' })) : null,
+    r.action === 'transform' ? h('div', { style: 'margin-top:9px' }, codeEditor(r.transform || '', 4, (value) => app.updateCfgRule(r.id, 'transform', value), { language: 'json' })) : null);
   return row;
 }
 

@@ -31,6 +31,10 @@ export function loadConfig(overrides = {}) {
     // Max ingest body captured (bytes). Larger requests get 413.
     maxBodyBytes: int(env.SIDEDOOR_MAX_BODY, 5 * 1024 * 1024),
 
+    // Absolute process-wide WebSocket/Socket.IO frame ceiling. Individual
+    // endpoints can only choose a smaller value in their realtime settings.
+    maxRealtimeFrameBytes: int(env.SIDEDOOR_MAX_REALTIME_FRAME, 16 * 1024 * 1024),
+
     // Path to the tailscale CLI.
     tailscaleBin: env.SIDEDOOR_TAILSCALE_BIN || 'tailscale',
 

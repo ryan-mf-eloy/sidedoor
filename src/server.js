@@ -8,6 +8,8 @@ import { loadConfig, localBase } from './config.js';
 import { openDb } from './db.js';
 import { Store } from './store.js';
 import { Events } from './events.js';
+import { EventDispatcher } from './event-dispatcher.js';
+import { RealtimeHub } from './realtime-hub.js';
 import { RateLimiter } from './lib/ratelimit.js';
 import { Tailscale } from './lib/tailscale.js';
 import { createApiRouter, } from './api/routes.js';
@@ -91,21 +93,32 @@ export function createApp(overrides = {}) {
   const config = loadConfig(overrides);
   const db = openDb(config.dbPath);
   const store = new Store(db);
+  // Connections cannot be resumed safely after process loss. Preserve their
+  // transcript, but make the terminal state explicit before accepting new IO.
+  store.closeOpenRealtimeSessions();
   const events = new Events();
   const rateLimiter = new RateLimiter();
   const ctx = { config, db, store, events, rateLimiter };
   ctx.tailscale = overrides.tailscale || new Tailscale({ store, config, events });
+  ctx.dispatcher = overrides.dispatcher || new EventDispatcher({ store, events, fetchImpl: overrides.eventFetch || globalThis.fetch });
+  ctx.realtime = overrides.realtime || new RealtimeHub(ctx);
 
   const apiRouter = createApiRouter();
   const adminServer = http.createServer(makeAdminHandler(ctx, apiRouter));
   const ingestServer = http.createServer(createIngestHandler(ctx));
+  if (ctx.realtime && ctx.realtime.attach) ctx.realtime.attach(ingestServer);
 
   let pollTimer = null;
 
   function start() {
     return new Promise((resolve) => {
       let pending = 2;
-      const done = () => { if (--pending === 0) resolve(app); };
+      const done = () => {
+        if (--pending === 0) {
+          if (ctx.dispatcher && ctx.dispatcher.start) ctx.dispatcher.start();
+          resolve(app);
+        }
+      };
       adminServer.listen(config.adminPort, config.adminHost, done);
       ingestServer.listen(config.ingestPort, config.ingestHost, done);
     });
@@ -119,10 +132,12 @@ export function createApp(overrides = {}) {
     }
   }
 
-  function close() {
+  async function close() {
+    if (pollTimer) clearInterval(pollTimer);
+    if (ctx.dispatcher && ctx.dispatcher.stop) await ctx.dispatcher.stop();
+    if (ctx.realtime && ctx.realtime.close) await ctx.realtime.close();
+    events.closeAll();
     return new Promise((resolve) => {
-      if (pollTimer) clearInterval(pollTimer);
-      events.closeAll();
       let pending = 2;
       const done = () => { if (--pending === 0) { try { db.close(); } catch { /* ignore */ } resolve(); } };
       adminServer.close(done);
@@ -130,7 +145,7 @@ export function createApp(overrides = {}) {
     });
   }
 
-  const app = { config, db, store, events, rateLimiter, ctx, adminServer, ingestServer, start, startFunnelPoll, close };
+  const app = { config, db, store, events, rateLimiter, dispatcher: ctx.dispatcher, realtime: ctx.realtime, ctx, adminServer, ingestServer, start, startFunnelPoll, close };
   return app;
 }
 

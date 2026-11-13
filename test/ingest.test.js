@@ -239,3 +239,41 @@ test('SSE broadcasts captured requests', async (t) => {
   assert.equal(evt.endpointId, w.id);
   assert.equal(evt.request.event, 'ping');
 });
+
+test('mock prefix path matches dynamic GET segments', async (t) => {
+  const app = await bootTestApp();
+  t.after(() => app.close());
+  const m = await mkMock(app, {
+    slug: 'sales-query',
+    method: 'GET',
+    path: '/1/sales',
+    pathMode: 'prefix',
+    body: '{"Payment":{"PaymentId":"{{$pathPaymentId}}","Status":12}}',
+  });
+  await api(app, 'PATCH', `/endpoints/${m.id}`, { pathMode: 'prefix' });
+  const res = await ingest(app, '/' + m.slug + '/1/sales/abc', { method: 'GET' });
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.Payment.PaymentId, 'abc');
+  assert.equal(json.Payment.Status, 12);
+  assert.equal((await ingest(app, '/' + m.slug + '/1/salesman', { method: 'GET' })).status, 404);
+});
+
+test('mock allowedMethods accepts POST and PUT on one slug', async (t) => {
+  const app = await bootTestApp();
+  t.after(() => app.close());
+  const m = await mkMock(app, {
+    slug: 'sales-tx',
+    method: 'POST',
+    path: '/1/sales',
+    pathMode: 'prefix',
+    body: '{"ok":true}',
+  });
+  await api(app, 'PATCH', `/endpoints/${m.id}`, {
+    pathMode: 'prefix',
+    allowedMethods: ['POST', 'PUT'],
+  });
+  assert.equal((await ingest(app, '/' + m.slug + '/1/sales', { method: 'POST', body: '{}' })).status, 200);
+  assert.equal((await ingest(app, '/' + m.slug + '/1/sales/paid-1/void?amount=100', { method: 'PUT', body: '{}' })).status, 200);
+  assert.equal((await ingest(app, '/' + m.slug + '/1/sales', { method: 'GET' })).status, 405);
+});

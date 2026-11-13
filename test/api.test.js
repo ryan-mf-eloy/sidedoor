@@ -11,6 +11,9 @@ test('GET /state bootstraps workspace + counts + funnel', async (t) => {
   assert.ok(json.activeWorkspace);
   assert.equal(json.funnel.active, 0);
   assert.ok(json.baseUrls.local.startsWith('http://'));
+  assert.equal(json.templateCatalog.event.suggestions.some((item) => item.token === '{{response.body.field}}'), true);
+  assert.equal(json.templateCatalog.mockResponse.suggestions.some((item) => item.token === '{{$body.field}}'), true);
+  assert.equal(json.templateCatalog.event.suggestions.find((item) => item.token === '{{request.headers.header-name}}').dynamicPrefix, 'request.headers.');
 });
 
 test('workspace lifecycle + guards', async (t) => {

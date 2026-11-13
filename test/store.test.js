@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb } from '../src/db.js';
+import { openDb, SCHEMA_VERSION } from '../src/db.js';
 import { Store } from '../src/store.js';
 
 function fresh() {
@@ -129,7 +129,41 @@ test('sequence cursor rotates', () => {
   assert.deepEqual([0, 1, 2, 0].map(() => s.advanceSeqCursor(id, 3)), [0, 1, 2, 0]);
 });
 
-test('activity + counts scoped to workspace, combining webhooks and mocks', () => {
+test('restart recovery never requeues a cancelled in-flight delivery', () => {
+  const s = fresh();
+  const ws = s.getActiveWorkspace();
+  const endpointId = s.createEndpoint({ workspaceId: ws, type: 'mock', name: 'Queue', slug: 'queue', method: 'POST', path: '/jobs', config: {} });
+  const scenario = s.addScenario(endpointId, { name: 'Accepted', active: true, body: '{}' });
+  const event = s.addScenarioEvent(scenario.id, { name: 'Callback', request: { url: 'https://receiver.example.test/callback' } });
+  const run = s.createEventRun({ endpointId, scenarioId: scenario.id, events: [event], context: {} });
+  assert.ok(s.claimDueEventJob(Date.now() + 1));
+  s.cancelEventRun(run.id);
+  s.recoverEventJobs(Date.now() + 2);
+
+  const recovered = s.getEventRun(run.id, { details: true });
+  assert.equal(recovered.status, 'cancelled');
+  assert.equal(recovered.pendingJobs, 0);
+  assert.equal(recovered.jobs[0].status, 'cancelled');
+});
+
+test('deleting a mock cascades its async-event configuration and delivery history', () => {
+  const s = fresh();
+  const ws = s.getActiveWorkspace();
+  const endpointId = s.createEndpoint({ workspaceId: ws, type: 'mock', name: 'Cascade', slug: 'cascade', method: 'POST', path: '/jobs', config: {} });
+  const scenario = s.addScenario(endpointId, { name: 'Accepted', active: true, body: '{}' });
+  const event = s.addScenarioEvent(scenario.id, { name: 'Callback', request: { url: 'https://receiver.example.test/callback' } });
+  const run = s.createEventRun({ endpointId, scenarioId: scenario.id, events: [event], context: {} });
+  const execution = s.claimDueEventJob(Date.now() + 1);
+  s.recordEventAttempt(execution.job.id, { ok: true, status: 204, durationMs: 1 });
+  s.deleteEndpoint(endpointId);
+
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM scenario_events').get().n, 0);
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM event_runs WHERE id=?').get(run.id).n, 0);
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM event_jobs').get().n, 0);
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM event_attempts').get().n, 0);
+});
+
+test('activity + counts scope HTTP and realtime mock servers to the workspace', () => {
   const s = fresh();
   const ws = s.getActiveWorkspace();
   const id = s.createEndpoint({ workspaceId: ws, type: 'inspector', name: 'W', slug: 'act', config: {} });
@@ -138,6 +172,7 @@ test('activity + counts scoped to workspace, combining webhooks and mocks', () =
   const mockId = s.createEndpoint({ workspaceId: ws, type: 'mock', name: 'M', slug: 'act-mock', method: 'POST', path: '/x', config: {} });
   s.insertRequest({ endpointId: mockId, method: 'POST', path: '/x', status: 201, eventLabel: 'e2' });
   s.bumpActivity(mockId, Date.now());
+  s.createEndpoint({ workspaceId: ws, type: 'mock', protocol: 'websocket', name: 'Stream', slug: 'act-stream', config: {} });
 
   const activity = s.recentActivity(ws);
   assert.equal(activity.length, 2);
@@ -145,7 +180,8 @@ test('activity + counts scoped to workspace, combining webhooks and mocks', () =
 
   const counts = s.counts(ws);
   assert.equal(counts.webhooks, 1);
-  assert.equal(counts.mocks, 1);
+  assert.equal(counts.mocks, 2);
+  assert.equal(counts.websockets, 1);
   assert.equal(counts.captured, 1);
   assert.equal(counts.mocked, 1);
   assert.equal(counts.totalRequests, 2);
@@ -215,7 +251,7 @@ test('migration v1->v2: existing match_rules rows survive, when_field widened', 
     const db = openDb(dbPath); // must run the migration on this pre-existing file
     const s = new Store(db);
 
-    assert.equal(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '2');
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, SCHEMA_VERSION);
     const survived = s.listMatchRules('ep-1');
     assert.equal(survived.length, 1);
     assert.deepEqual(survived[0], { id: 'mr-1', when: 'header', key: 'X-Test-Scenario', op: 'equals', value: 'decline', then: 'sc-1', position: 0, enabled: true });
@@ -224,6 +260,96 @@ test('migration v1->v2: existing match_rules rows survive, when_field widened', 
     assert.equal(s.addMatchRule('ep-1', { when: 'method', key: '', op: 'equals', value: 'GET', then: 'sc-1' }).when, 'method');
     assert.equal(s.addMatchRule('ep-1', { when: 'path', key: '', op: 'contains', value: '/v2', then: 'sc-1' }).when, 'path');
 
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration v3->v4: async event tables are added without changing scenario data', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sidedoor-v3-migration-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const setup = new DatabaseSync(dbPath);
+    setup.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE endpoints (
+        id TEXT PRIMARY KEY, workspace_id TEXT, project_id TEXT, type TEXT, name TEXT, slug TEXT,
+        method TEXT, path TEXT, path_mode TEXT NOT NULL DEFAULT 'exact', allowed_methods TEXT,
+        mode TEXT, forward_target TEXT, seq_cursor INTEGER, config_auth TEXT, config_hmac TEXT,
+        config_rate TEXT, config_rules TEXT, rule_match TEXT, created_at INTEGER, last_activity INTEGER, request_count INTEGER
+      );
+      CREATE TABLE scenarios (
+        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, name TEXT NOT NULL, status INTEGER NOT NULL,
+        delay_ms INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 0, headers TEXT, body TEXT,
+        content_type TEXT NOT NULL DEFAULT 'application/json', position INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    setup.prepare("INSERT INTO meta(key,value) VALUES('schema_version','3')").run();
+    setup.prepare('INSERT INTO endpoints(id,type,name,slug,path_mode,mode,seq_cursor,created_at,request_count) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run('ep-v3', 'mock', 'Legacy mock', 'legacy-v3', 'exact', 'single', 0, Date.now(), 0);
+    setup.prepare('INSERT INTO scenarios(id,endpoint_id,name,status,body,content_type,position) VALUES(?,?,?,?,?,?,?)')
+      .run('sc-v3', 'ep-v3', 'Existing scenario', 202, '{"ok":true}', 'application/json', 0);
+    setup.close();
+
+    const db = openDb(dbPath);
+    const store = new Store(db);
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, SCHEMA_VERSION);
+    for (const table of ['scenario_events', 'event_runs', 'event_jobs', 'event_attempts']) {
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table));
+    }
+    assert.equal(store.getScenario('sc-v3').body, '{"ok":true}');
+    const event = store.addScenarioEvent('sc-v3', {
+      name: 'Legacy callback',
+      request: { url: 'https://example.test/callback', method: 'POST' },
+    });
+    assert.equal(store.listScenarioEvents('sc-v3')[0].id, event.id);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration v4->v5: legacy HTTP endpoints gain realtime defaults and cascades', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sidedoor-v4-migration-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const setup = new DatabaseSync(dbPath);
+    setup.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE endpoints (
+        id TEXT PRIMARY KEY, workspace_id TEXT, project_id TEXT, type TEXT, name TEXT, slug TEXT,
+        method TEXT, path TEXT, path_mode TEXT NOT NULL DEFAULT 'exact', allowed_methods TEXT,
+        mode TEXT NOT NULL DEFAULT 'single', forward_target TEXT, seq_cursor INTEGER NOT NULL DEFAULT 0,
+        config_auth TEXT, config_hmac TEXT, config_rate TEXT, config_rules TEXT,
+        rule_match TEXT NOT NULL DEFAULT 'all', created_at INTEGER NOT NULL, last_activity INTEGER, request_count INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    setup.prepare("INSERT INTO meta(key,value) VALUES('schema_version','4')").run();
+    setup.prepare('INSERT INTO endpoints(id,type,name,slug,path_mode,mode,seq_cursor,created_at,request_count) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run('ep-v4', 'mock', 'Legacy HTTP mock', 'legacy-v4', 'exact', 'single', 0, Date.now(), 0);
+    setup.close();
+
+    const db = openDb(dbPath);
+    const store = new Store(db);
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, SCHEMA_VERSION);
+    const legacy = store.getEndpoint('ep-v4');
+    assert.equal(legacy.protocol, 'http');
+    assert.equal(legacy.config.realtime.maxConnections, 100);
+    for (const table of ['realtime_sessions', 'realtime_messages', 'realtime_scripts', 'realtime_script_steps', 'graphql_schemas', 'graphql_fixtures']) {
+      assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table));
+    }
+
+    const session = store.createRealtimeSession({ endpointId: legacy.id, protocol: 'websocket', transport: 'websocket' });
+    store.appendRealtimeMessage(session.id, { direction: 'in', kind: 'text', payload: 'hello', payloadSize: 5 }, 10);
+    const script = store.addRealtimeScript(legacy.id, { name: 'Flow' });
+    store.addRealtimeStep(script.id, { match: { kind: 'message', text: 'hello', payload: null }, actions: [] });
+    store.setGraphqlSchema(legacy.id, 'type Query { health: String }');
+    store.addGraphqlFixture(legacy.id, { name: 'Health', operationType: 'query', response: { data: { health: 'ok' } } });
+    store.deleteEndpoint(legacy.id);
+    for (const table of ['realtime_sessions', 'realtime_messages', 'realtime_scripts', 'realtime_script_steps', 'graphql_schemas', 'graphql_fixtures']) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
+    }
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

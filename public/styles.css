@@ -35,11 +35,23 @@ a { color: inherit; }
 @keyframes sd-scrim { 0% { opacity: 0; } 100% { opacity: 1; } }
 @keyframes sd-pop { 0% { opacity: 0; transform: translateY(10px) scale(.972); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes sd-spin { to { transform: rotate(360deg); } }
+@keyframes sd-route-enter { 0% { transform: translateY(3px); } 100% { transform: translateY(0); } }
+@keyframes sd-navigation-chrome-enter { 0% { transform: translateX(-2px); } 100% { transform: translateX(0); } }
 
 /* Hover helper: elements with data-hover get a background/color swap. */
 [data-hover] { transition: background .14s, color .14s; }
 
 #app { display: block; }
+
+/* Route changes receive a single short entrance. Same-view updates (editing,
+   polling, and live feed events) intentionally never receive this class. */
+.sd-route-enter { animation: sd-route-enter .17s cubic-bezier(.22,.8,.32,1) both; }
+.sd-navigation-chrome-enter { animation: sd-navigation-chrome-enter .14s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-route-enter,
+  .sd-navigation-chrome-enter { animation: none; }
+}
 
 /* Toasts */
 #toast-root { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }

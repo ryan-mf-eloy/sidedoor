@@ -1,12 +1,15 @@
-/* <sd-json-editor> — a JSON body editor with live syntax highlighting and
- * inline linting that marks the error at its exact character position.
+import { codeStatus, formatCode, highlightCode } from './code-format.js';
+
+/* <sd-json-editor> — a code body editor with live syntax highlighting and
+ * inline validation that marks the error at its exact character position.
  *
  * Emits a bubbling `input` event (React onInput reads e.target.value from the
  * inner <textarea>). Reflects an external `value` (attribute or property) only
  * when it actually differs from what's typed, so React re-renders never disturb
  * the caret. Formats valid JSON on blur and via the Format button.
  *
- * Colors mirror the app's hlJSON() scheme so editors match read-only previews.
+ * It keeps the legacy element name so JSON forms remain compatible while a
+ * language attribute enables XML, GraphQL, HTTP and template editors.
  */
 (function () {
   if (window.customElements && customElements.get('sd-json-editor')) return;
@@ -21,27 +24,6 @@
 
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  // Tokenize raw (possibly invalid) text — never reformats, so the caret is safe.
-  var TOK = /("(?:\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?|[{}\[\],])/g;
-  function highlight(src) {
-    var out = esc(src).replace(TOK, function (m) {
-      if (m.charAt(0) === '"') {
-        if (/:\s*$/.test(m)) {
-          return '<span style="color:' + C.key + '">' + m.replace(/:\s*$/, '') +
-                 '</span><span style="color:' + C.colon + '">:</span>';
-        }
-        return '<span style="color:' + C.str + '">' + m + '</span>';
-      }
-      if (m === 'true' || m === 'false') return '<span style="color:' + C.bool + '">' + m + '</span>';
-      if (m === 'null') return '<span style="color:' + C.nul + '">' + m + '</span>';
-      if (/^[{}\[\],]$/.test(m)) return '<span style="color:' + C.punct + '">' + m + '</span>';
-      return '<span style="color:' + C.num + '">' + m + '</span>';
-    });
-    // Preserve a trailing blank line so the highlight height matches the textarea.
-    if (src.charAt(src.length - 1) === '\n') out += '\n';
-    return out || '&nbsp;';
   }
 
   // A strict recursive-descent JSON scanner that reports the FIRST error and its
@@ -126,6 +108,24 @@
     }
   }
 
+  function lintLanguage(src, language) {
+    if (language === 'json') return lint(src);
+    if (!src || !src.trim()) return null;
+    var checked = codeStatus(src, language);
+    if (checked.valid) return null;
+    return { message: checked.message || 'Invalid ' + checked.label, pos: checked.position, line: checked.line, col: checked.column };
+  }
+
+  function positionAt(src, line, column) {
+    var rows = String(src).split('\n');
+    var targetLine = Math.max(1, Number(line) || 1);
+    var targetColumn = Math.max(1, Number(column) || 1);
+    var offset = 0;
+    for (var index = 0; index < targetLine - 1 && index < rows.length; index++) offset += rows[index].length + 1;
+    var row = rows[Math.min(rows.length - 1, targetLine - 1)] || '';
+    return Math.min(String(src).length, offset + Math.min(row.length, targetColumn - 1));
+  }
+
   // Transparent overlay that carries only a wavy underline under the bad char.
   function errorLayer(src, pos) {
     var mid, tail = '';
@@ -148,12 +148,14 @@
   SdJsonEditor.prototype = PROTO;
   PROTO.constructor = SdJsonEditor;
 
-  Object.defineProperty(SdJsonEditor, 'observedAttributes', { get: function () { return ['value', 'rows']; } });
+  Object.defineProperty(SdJsonEditor, 'observedAttributes', { get: function () { return ['value', 'rows', 'language']; } });
 
   PROTO.connectedCallback = function () {
     if (this._built) { return; }
     this._built = true;
+    if (!Object.prototype.hasOwnProperty.call(this, '_externalValidation')) this._externalValidation = null;
     var rows = parseInt(this.getAttribute('rows') || '6', 10);
+    this._language = this.getAttribute('language') || 'json';
     var initial = this.getAttribute('value');
     if (initial == null) initial = this.textContent || '';
     this.textContent = '';
@@ -195,31 +197,44 @@
     fmt.innerHTML = ICON_FMT + '<span style="margin-left:5px">Format</span>';
     fmt.style.cssText = 'display:inline-flex;align-items:center;background:transparent;color:' + C.muted +
       ";font:600 11.5px/1 'IBM Plex Sans',system-ui,sans-serif;padding:3px 4px;border:0;cursor:pointer;transition:color .12s;flex-shrink:0";
-    foot.appendChild(status); foot.appendChild(fmt);
+    var templateBtn = document.createElement('button');
+    templateBtn.type = 'button';
+    templateBtn.title = 'Insert template variable';
+    templateBtn.setAttribute('aria-label', 'Insert template variable');
+    templateBtn.innerHTML = '<span style="font-family:IBM Plex Mono,monospace;font-size:10px;font-weight:700;color:#e8b88a">{ }</span><span style="margin-left:5px">Variables</span>';
+    templateBtn.style.cssText = 'display:none;align-items:center;background:transparent;color:#9c927f;' +
+      "font:600 11.5px/1 'IBM Plex Sans',system-ui,sans-serif;padding:3px 4px;border:0;border-radius:var(--radius-xs);cursor:pointer;transition:color .12s,background .12s;flex-shrink:0";
+    foot.appendChild(status); foot.appendChild(templateBtn); foot.appendChild(fmt);
 
     this.appendChild(wrap); this.appendChild(foot);
-    this._ta = ta; this._hl = hl; this._errl = errl; this._status = status; this._wrap = wrap; this._fmt = fmt;
+    this._ta = ta; this._hl = hl; this._errl = errl; this._status = status; this._wrap = wrap; this._fmt = fmt; this._templateButton = templateBtn;
 
     var self = this;
-    ta.addEventListener('input', function () { self._render(); });
+    ta.addEventListener('input', function () { self._externalValidation = null; self._render(); });
     ta.addEventListener('scroll', function () { hl.scrollTop = ta.scrollTop; errl.scrollTop = ta.scrollTop; });
     ta.addEventListener('focus', function () { wrap.style.boxShadow = 'inset 0 0 0 1px rgba(245,240,230,0.07), 0 0 0 2px rgba(237,236,236,0.6)'; });
     ta.addEventListener('blur', function () {
       wrap.style.boxShadow = 'inset 0 0 0 1px rgba(245,240,230,0.07)';
-      self._format();   // tidy valid JSON when leaving the field
+      self._format();   // tidy valid structured code when leaving the field
     });
     fmt.addEventListener('mouseenter', function () { if (!fmt.disabled) fmt.style.color = '#e8e2d7'; });
     fmt.addEventListener('mouseleave', function () { if (!fmt.disabled) fmt.style.color = C.muted; });
     fmt.addEventListener('mousedown', function (e) { e.preventDefault(); }); // keep textarea focus
     fmt.addEventListener('click', function () { self._format(); self._ta.focus(); });
+    templateBtn.addEventListener('mouseenter', function () { templateBtn.style.color = '#e8e2d7'; templateBtn.style.background = '#211d17'; });
+    templateBtn.addEventListener('mouseleave', function () { templateBtn.style.color = '#9c927f'; templateBtn.style.background = 'transparent'; });
+    templateBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
 
+    this._syncTemplateControl();
     this._render();
+    this.dispatchEvent(new CustomEvent('sd-editor-ready'));
   };
 
   PROTO.attributeChangedCallback = function (name, oldV, newV) {
     if (!this._built) return;
     if (name === 'value') this.value = newV == null ? '' : newV;
     else if (name === 'rows' && this._hl) this._hl.style.minHeight = (parseInt(newV || '6', 10) * 1.6) + 'em';
+    else if (name === 'language') { this._language = newV || 'json'; this._render(); }
   };
 
   Object.defineProperty(PROTO, 'value', {
@@ -235,13 +250,46 @@
     }
   });
 
+  Object.defineProperty(PROTO, 'externalValidation', {
+    get: function () { return this._externalValidation || null; },
+    set: function (value) {
+      this._externalValidation = value && typeof value === 'object' ? value : null;
+      if (this._built) this._render();
+    }
+  });
+
+  PROTO.setExternalValidation = function (value) {
+    this.externalValidation = value;
+  };
+
+  Object.defineProperty(PROTO, 'templateSuggestions', {
+    get: function () { return this._templateSuggestions || []; },
+    set: function (value) {
+      this._templateSuggestions = Array.isArray(value) ? value : [];
+      if (this._built) this._syncTemplateControl();
+    }
+  });
+
+  Object.defineProperty(PROTO, 'templateButton', {
+    get: function () { return this._templateButton || null; }
+  });
+
+  PROTO.getInputElement = function () {
+    return this._ta || null;
+  };
+
+  PROTO._syncTemplateControl = function () {
+    if (!this._templateButton) return;
+    this._templateButton.style.display = this._templateSuggestions && this._templateSuggestions.length ? 'inline-flex' : 'none';
+  };
+
   PROTO._format = function () {
     var v = this._ta.value;
     if (!v || !v.trim()) return;
-    try {
-      var pretty = JSON.stringify(JSON.parse(v), null, 2);
-      if (pretty !== v) { this._ta.value = pretty; this._render(); this._emit(); }
-    } catch (_) { /* invalid — leave as typed */ }
+    var checked = codeStatus(v, this._language);
+    if (!checked.valid) return;
+    var pretty = formatCode(v, this._language).formatted;
+    if (pretty !== v) { this._ta.value = pretty; this._render(); this._emit(); }
   };
 
   PROTO._emit = function () {
@@ -250,8 +298,23 @@
 
   PROTO._render = function () {
     var v = this._ta.value;
-    this._hl.innerHTML = highlight(v);
-    var err = lint(v);
+    var language = this._language || 'json';
+    this._hl.innerHTML = highlightCode(v, language, { format: false }) || '&nbsp;';
+    if (v.charAt(v.length - 1) === '\n') this._hl.innerHTML += '\n';
+    var err = lintLanguage(v, language);
+    var checked = codeStatus(v, language);
+    var external = this._externalValidation && this._externalValidation.source === v ? this._externalValidation : null;
+    if (!err && external && external.valid === false) {
+      var externalLine = Math.max(1, Number(external.line) || 1);
+      var externalColumn = Math.max(1, Number(external.column) || 1);
+      err = {
+        message: external.message || 'Invalid GraphQL SDL',
+        pos: Number.isInteger(external.position) ? Math.max(0, Math.min(v.length, external.position)) : positionAt(v, externalLine, externalColumn),
+        line: externalLine,
+        col: externalColumn
+      };
+    }
+    var canFormat = ['json', 'xml', 'html', 'graphql', 'http'].indexOf(checked.language) !== -1;
     if (err) {
       this._errl.innerHTML = errorLayer(v, err.pos);
       this._errl.style.display = 'block';
@@ -268,9 +331,10 @@
         this._status.innerHTML = '';
         this._fmt.disabled = true; this._fmt.style.opacity = '.4'; this._fmt.style.cursor = 'default';
       } else {
-        this._status.style.color = C.ok;
-        this._status.innerHTML = ICON_OK + '<span>Valid JSON</span>';
-        this._fmt.disabled = false; this._fmt.style.opacity = '1'; this._fmt.style.cursor = 'pointer';
+        var statusText = external && external.pending ? 'Checking GraphQL SDL…' : external && external.valid === true ? 'Valid GraphQL SDL' : checked.text;
+        this._status.style.color = external && external.pending ? C.muted : C.ok;
+        this._status.innerHTML = (external && external.pending ? '' : ICON_OK) + '<span>' + esc(statusText) + '</span>';
+        this._fmt.disabled = !canFormat; this._fmt.style.opacity = canFormat ? '1' : '.4'; this._fmt.style.cursor = canFormat ? 'pointer' : 'default';
       }
     }
     // keep overlays aligned with any textarea scroll

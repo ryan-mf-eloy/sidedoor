@@ -1,9 +1,9 @@
 // Sidedoor SPA controller: state, actions, live updates, and the app shell
 // (sidebar + header). Screen bodies live in ./screens/*.
 import * as api from './api.js';
-import { h, raw, clear, icons, wsIconSvg, copy as clip, toast } from './ui.js';
+import { h, raw, clear, closeFloatingPanels, icons, wsIconSvg, copy as clip, toast } from './ui.js';
 import { dashboardScreen } from './screens/lists.js';
-import { webhooksScreen, mocksScreen, projectEditor, projectDeleteConfirm } from './screens/lists.js';
+import { webhooksScreen, mocksScreen, mockProtocolPickerScreen, isMockServerEndpoint, projectEditor, projectDeleteConfirm } from './screens/lists.js';
 import { inspectorScreen, requestScreen, diffScreen } from './screens/inspector.js';
 import { mockScreen } from './screens/mock.js';
 import { settingsScreen } from './screens/settings.js';
@@ -11,19 +11,26 @@ import { tailscaleScreen } from './screens/tailscale.js';
 import { newInspectorScreen, newMockScreen } from './screens/forms.js';
 import { workspaceEditor, workspaceDeleteConfirm } from './screens/workspace.js';
 import { endpointEditor, endpointDeleteConfirm } from './screens/endpoint.js';
+import { newRealtimeScreen, realtimeScreen } from './screens/realtime.js';
+import { isNavigationChange, navigationViewKey } from './navigation-motion.js';
 
 const state = {
   route: 'dashboard', loading: true, now: Date.now(),
   workspaces: [], activeWorkspace: null, sidebarCollapsed: false,
   counts: {}, funnel: { state: null, history: [], exposed: [] }, baseUrls: { local: '', publicBase: null },
+  templateCatalog: {},
   endpoints: [], projects: [], activity: [], projQuery: '',
   overview: null, overviewPeriod: '24h',
   activeEp: null, feed: [], feedFilter: { search: '', method: 'ALL' }, previewReqId: null,
   activeReq: null, compareMode: false, selected: [], detailTab: 'body',
   replayOpen: false, replayTarget: '', replayResult: null,
-  mockTab: 'config', mockReqSelected: null, mockReqTab: 'body', expandedScenario: null,
+  mockTab: 'config', mockProtocolFilter: 'all', mockReqSelected: null, mockReqTab: 'body', expandedScenario: null,
   addScenarioOpen: false, newScenario: { name: '', status: 200, delay: 0, contentType: 'application/json', body: '{ "ok": true }' },
   editingScenario: null, editScenario: null,
+  mockDeliveries: [], selectedDeliveryRun: null, eventEditor: null, eventTest: null,
+  realtimeTab: 'sessions', realtimeSessions: [], realtimeSelectedSession: null,
+  realtimeScripts: [], realtimeSchema: null, realtimeFixtures: [],
+  realtimeError: '', realtimeSchemaValidation: null, realtimeTest: null, realtimeTestResult: null,
   addRuleOpen: false, newRule: { when: 'header', key: '', op: 'equals', value: '', then: '' },
   settingsTab: 'auth', secretReveal: false, settingsRequests: [],
   diff: null,
@@ -33,6 +40,7 @@ const state = {
   form: {
     insp: { name: '', slug: '', slugEdited: false, projectName: '', validate: false, provider: 'stripe', hmacSecret: '', errors: {}, submitted: false },
     mock: { name: '', projectName: '', method: 'POST', path: '/', status: 200, contentType: 'application/json', delay: 0, auth: 'none', authToken: '', authApiKeyName: 'X-Api-Key', authApiKeyLoc: 'header', authUser: '', authPass: '', body: '{\n  "ok": true\n}', errors: {}, submitted: false },
+    realtime: { protocol: 'websocket', type: 'mock', name: '', slug: '', projectName: '', sdl: 'type Query { health: String }', sdlValidation: { source: 'type Query { health: String }', valid: true }, errors: {}, submitted: false },
   },
   copied: null,
 };
@@ -40,6 +48,10 @@ const state = {
 const app = {
   state,
   get s() { return state; },
+  templateSuggestions(context) {
+    const catalog = state.templateCatalog && state.templateCatalog[context];
+    return catalog && Array.isArray(catalog.suggestions) ? catalog.suggestions : [];
+  },
   set(patch) { Object.assign(state, patch); render(); },
   render,
 };
@@ -51,6 +63,7 @@ async function boot() {
     Object.assign(state, {
       workspaces: st.workspaces, activeWorkspace: st.activeWorkspace,
       sidebarCollapsed: st.sidebarCollapsed, counts: st.counts, baseUrls: st.baseUrls,
+      templateCatalog: st.templateCatalog || {},
       funnel: { ...state.funnel, state: st.funnel }, loading: false,
     });
     await loadEndpoints();
@@ -65,6 +78,9 @@ async function boot() {
   render();
   api.connectEvents({
     request: (evt) => onLiveRequest(evt),
+    delivery: (evt) => onLiveDelivery(evt),
+    realtime_session: (evt) => onLiveRealtime(evt),
+    realtime_message: (evt) => onLiveRealtime(evt),
     funnel: (fs) => { state.funnel = { ...state.funnel, state: fs }; if (['dashboard', 'tailscale', 'webhooks', 'mocks'].includes(state.route)) render(); },
   });
   window.addEventListener('hashchange', applyHashRoute);
@@ -86,13 +102,63 @@ async function loadOverview() {
 }
 
 app.loadEndpoints = loadEndpoints;
+async function loadDeliveryRuns() {
+  if (!state.activeEp) { state.mockDeliveries = []; return; }
+  state.mockDeliveries = await api.get('/endpoints/' + state.activeEp.id + '/event-runs?limit=200');
+}
+app.loadDeliveryRuns = loadDeliveryRuns;
+
+function isRealtimeEndpoint(endpoint) {
+  return !!(endpoint && endpoint.protocol && endpoint.protocol !== 'http');
+}
+function realtimeListRoute() { return 'mocks'; }
+function endpointListRoute(endpoint) {
+  if (isRealtimeEndpoint(endpoint)) return realtimeListRoute(endpoint);
+  return endpoint && endpoint.type === 'mock' ? 'mocks' : 'webhooks';
+}
+async function loadRealtimeData() {
+  const endpoint = state.activeEp;
+  if (!isRealtimeEndpoint(endpoint)) {
+    state.realtimeSessions = []; state.realtimeSelectedSession = null;
+    state.realtimeScripts = []; state.realtimeSchema = null; state.realtimeSchemaValidation = null; state.realtimeFixtures = [];
+    return;
+  }
+  const sessions = await api.get('/endpoints/' + endpoint.id + '/realtime-sessions?limit=200');
+  state.realtimeSessions = sessions;
+  const selectedId = state.realtimeSelectedSession && state.realtimeSelectedSession.id;
+  if (selectedId) {
+    try { state.realtimeSelectedSession = await api.get('/realtime-sessions/' + selectedId); }
+    catch { state.realtimeSelectedSession = null; }
+  }
+  if (endpoint.protocol === 'graphql') {
+    const [schema, fixtures] = await Promise.all([
+      api.get('/endpoints/' + endpoint.id + '/graphql/schema'),
+      api.get('/endpoints/' + endpoint.id + '/graphql/fixtures'),
+    ]);
+    state.realtimeSchema = schema;
+    state.realtimeSchemaValidation = { source: schema.sdl, valid: true };
+    state.realtimeFixtures = fixtures;
+    state.realtimeScripts = [];
+  } else if (endpoint.type === 'mock') {
+    state.realtimeScripts = await api.get('/endpoints/' + endpoint.id + '/realtime-scripts');
+    state.realtimeSchema = null; state.realtimeSchemaValidation = null; state.realtimeFixtures = [];
+  } else {
+    state.realtimeScripts = []; state.realtimeSchema = null; state.realtimeSchemaValidation = null; state.realtimeFixtures = [];
+  }
+}
+app.loadRealtimeData = loadRealtimeData;
 
 // ---------------- live feed ----------------
 function onLiveRequest(evt) {
   // Update the list card counts.
   const listEp = state.endpoints.find((e) => e.id === evt.endpointId);
   if (listEp) { listEp.requestCount = (listEp.requestCount || 0) + 1; listEp.lastActivity = evt.request.receivedAt; }
-  if (state.activeEp && state.activeEp.id === evt.endpointId && (state.route === 'inspector' || (state.route === 'mock' && state.mockTab === 'requests'))) {
+  const activeMatches = state.activeEp && state.activeEp.id === evt.endpointId;
+  if (activeMatches) {
+    state.activeEp.requestCount = (state.activeEp.requestCount || 0) + 1;
+    state.activeEp.lastActivity = evt.request.receivedAt;
+  }
+  if (activeMatches && (state.route === 'inspector' || (state.route === 'mock' && state.mockTab === 'requests'))) {
     if (matchesFilter(evt.request)) {
       state.feed.push(evt.request);
       if (state.feed.length > 500) state.feed.shift();
@@ -102,6 +168,7 @@ function onLiveRequest(evt) {
       return;
     }
   }
+  if (activeMatches && state.route === 'mock') { render(); return; }
   // Keep "Recent verifications" (HMAC tab) and "Recent window usage" (Rate
   // tab) live while Settings is open, instead of the one-time snapshot
   // fetched when the screen was first opened.
@@ -112,6 +179,33 @@ function onLiveRequest(evt) {
   }
   if (state.route === 'dashboard') { Promise.all([loadActivity(), loadCounts(), loadOverview()]).then(render); }
   else if (state.route === 'webhooks' || state.route === 'mocks') render();
+}
+function onLiveDelivery(evt) {
+  if (!evt || !evt.run || !state.activeEp || state.activeEp.id !== evt.endpointId) return;
+  const summary = evt.run;
+  const existing = state.mockDeliveries || [];
+  state.mockDeliveries = [summary, ...existing.filter((run) => run.id !== summary.id)]
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (state.route !== 'mock' || state.mockTab !== 'deliveries') return;
+  if (state.selectedDeliveryRun && state.selectedDeliveryRun.id === summary.id) {
+    api.get('/event-runs/' + summary.id).then((run) => {
+      if (state.selectedDeliveryRun && state.selectedDeliveryRun.id === summary.id) {
+        state.selectedDeliveryRun = run;
+        render();
+      }
+    }).catch(() => {});
+  } else render();
+}
+function onLiveRealtime(evt) {
+  if (!evt || !evt.endpointId) return;
+  const listEp = state.endpoints.find((endpoint) => endpoint.id === evt.endpointId);
+  if (listEp) listEp.lastActivity = Date.now();
+  if (!state.activeEp || state.activeEp.id !== evt.endpointId) {
+    if (state.route === 'mocks') render();
+    return;
+  }
+  if (state.route !== 'realtime') return;
+  loadRealtimeData().then(render).catch(() => {});
 }
 function matchesFilter(r) {
   const f = state.feedFilter;
@@ -134,6 +228,8 @@ app.setRoute = setRoute;
 app.navDashboard = () => { Promise.all([loadActivity(), loadCounts(), loadOverview()]).then(() => setRoute('dashboard')); };
 app.navWebhooks = () => setRoute('webhooks');
 app.navMocks = () => setRoute('mocks');
+app.navWebSockets = app.navMocks;
+app.navGraphql = app.navMocks;
 app.navTailscale = () => { loadFunnel().then(() => setRoute('tailscale')); };
 app.setOverviewPeriod = (period) => { state.overviewPeriod = period; loadOverview().then(render); };
 
@@ -148,12 +244,14 @@ app.setOverviewPeriod = (period) => { state.overviewPeriod = period; loadOvervie
 let lastSyncedHash = null;
 function syncHash() {
   const p = new URLSearchParams();
-  if (state.activeEp && ['inspector', 'mock', 'request', 'diff', 'settings'].includes(state.route)) p.set('ep', state.activeEp.id);
+  if (state.activeEp && ['inspector', 'mock', 'request', 'diff', 'settings', 'realtime'].includes(state.route)) p.set('ep', state.activeEp.id);
   if (state.route === 'mock') {
     p.set('tab', state.mockTab);
     if (state.mockTab === 'requests' && state.mockReqSelected) { p.set('req', state.mockReqSelected.id); p.set('reqTab', state.mockReqTab); }
   } else if (state.route === 'settings') {
     p.set('tab', state.settingsTab);
+  } else if (state.route === 'realtime') {
+    p.set('tab', state.realtimeTab);
   } else if (state.route === 'request' && state.activeReq) {
     p.set('req', state.activeReq.id); p.set('tab', state.detailTab);
   } else if (state.route === 'diff' && state.diff) {
@@ -173,14 +271,16 @@ async function applyHashRoute() {
   if (!body) return; // no hash yet — keep the default boot state (dashboard)
 
   const [routePart, queryPart] = body.split('?');
-  const route = routePart || 'dashboard';
+  const requestedRoute = routePart || 'dashboard';
+  const route = ['websockets', 'graphql'].includes(requestedRoute) ? 'mocks' : requestedRoute;
   const p = new URLSearchParams(queryPart || '');
   const epId = p.get('ep');
-  const NEEDS_EP = ['inspector', 'mock', 'request', 'diff', 'settings'];
+  const NEEDS_EP = ['inspector', 'mock', 'request', 'diff', 'settings', 'realtime'];
 
   try {
     if (!NEEDS_EP.includes(route)) {
       state.route = route; state.dropdown = null;
+      if (route !== requestedRoute) { syncHash(); render(); return; }
       render();
       return;
     }
@@ -192,12 +292,14 @@ async function applyHashRoute() {
       await reloadFeed();
       state.previewReqId = state.feed.length ? state.feed[state.feed.length - 1].id : null;
     } else if (route === 'mock') {
-      state.mockTab = p.get('tab') === 'requests' ? 'requests' : 'config';
-      state.mockReqSelected = null; state.expandedScenario = null;
+      state.mockTab = ['requests', 'deliveries'].includes(p.get('tab')) ? p.get('tab') : 'config';
+      state.mockReqSelected = null; state.selectedDeliveryRun = null; state.expandedScenario = null;
       if (state.mockTab === 'requests') {
         await reloadFeed();
         const reqId = p.get('req');
         if (reqId) { state.mockReqSelected = await api.get('/requests/' + reqId); state.mockReqTab = p.get('reqTab') || 'body'; }
+      } else if (state.mockTab === 'deliveries') {
+        await loadDeliveryRuns();
       }
     } else if (route === 'request') {
       const reqId = p.get('req');
@@ -213,6 +315,13 @@ async function applyHashRoute() {
       state.settingsTab = p.get('tab') || 'auth';
       state.secretReveal = false;
       try { state.settingsRequests = await api.get('/endpoints/' + epId + '/requests?limit=25'); } catch { state.settingsRequests = []; }
+    } else if (route === 'realtime') {
+      if (!isRealtimeEndpoint(state.activeEp)) throw new Error('not realtime');
+      const defaultTab = state.activeEp.protocol === 'graphql' ? 'operations' : 'sessions';
+      state.realtimeTab = p.get('tab') || defaultTab;
+      state.realtimeSelectedSession = null; state.realtimeError = '';
+      state.realtimeTest = null; state.realtimeTestResult = null;
+      await loadRealtimeData();
     }
     state.route = route; state.dropdown = null;
   } catch (e) {
@@ -275,11 +384,9 @@ app.setDropdown = (id) => app.set({ dropdown: state.dropdown === id ? null : id 
 app.closeDropdown = () => app.set({ dropdown: null });
 app.selectHelper = (id, value, options, onPick, extra = {}) => ({
   value, options,
-  // Every pick closes the dropdown AND re-renders — matching the design's
-  // React setState behavior, so selects update even when the underlying
-  // setter (e.g. setNewScenario) doesn't render on its own.
-  onPick: (v) => { state.dropdown = null; onPick(v); app.rerender(); },
-  open: state.dropdown === id, onToggle: () => app.setDropdown(id), onClose: () => app.closeDropdown(),
+  // Local selects update their own label. A caller explicitly returns true
+  // only when changing the choice also changes which controls are visible.
+  onPick: (v) => { state.dropdown = null; if (onPick(v) === true || extra.rerender) app.rerender(); },
   ...extra,
 });
 
@@ -287,13 +394,21 @@ app.selectHelper = (id, value, options, onPick, extra = {}) => ({
 app.openEndpoint = async (ep) => {
   const full = await api.get('/endpoints/' + ep.id);
   state.activeEp = full;
-  if (full.type === 'inspector') {
+  if (isRealtimeEndpoint(full)) {
+    state.route = 'realtime';
+    state.realtimeTab = full.protocol === 'graphql' ? 'operations' : 'sessions';
+    state.realtimeSessions = []; state.realtimeSelectedSession = null;
+    state.realtimeScripts = []; state.realtimeSchema = null; state.realtimeSchemaValidation = null; state.realtimeFixtures = [];
+    state.realtimeError = ''; state.realtimeTest = null; state.realtimeTestResult = null;
+    await loadRealtimeData();
+    syncHash(); render();
+  } else if (full.type === 'inspector') {
     state.route = 'inspector'; state.compareMode = false; state.selected = []; state.feedFilter = { search: '', method: 'ALL' };
     await reloadFeed();
     state.previewReqId = state.feed.length ? state.feed[state.feed.length - 1].id : null;
     syncHash(); render(); scrollFeedToBottom();
   } else {
-    state.route = 'mock'; state.mockTab = 'config'; state.mockReqSelected = null;
+    state.route = 'mock'; state.mockTab = 'config'; state.mockReqSelected = null; state.mockDeliveries = []; state.selectedDeliveryRun = null;
     state.expandedScenario = null; // scenarios start collapsed by default
     syncHash(); render();
   }
@@ -321,14 +436,14 @@ app.deleteEndpoint = async (ep) => {
   await api.del('/endpoints/' + ep.id);
   if (state.activeEp && state.activeEp.id === ep.id) state.activeEp = null;
   await loadEndpoints(); await loadCounts();
-  setRoute(ep.type === 'mock' ? 'mocks' : 'webhooks');
+  setRoute(endpointListRoute(ep));
 };
 
 // ---- edit / delete via modals ----
 app.openEpEditor = (ep) => app.set({
   dropdown: null,
   epEditor: {
-    id: ep.id, type: ep.type, name: ep.name, slug: ep.slug,
+    id: ep.id, type: ep.type, protocol: ep.protocol || 'http', name: ep.name, slug: ep.slug,
     method: ep.method || 'POST', path: ep.path || '/',
     projectName: ep.project ? ep.project.name : '',
     forwardTarget: ep.forward_target || ep.forwardTarget || '', error: {},
@@ -338,7 +453,8 @@ app.cancelEpEditor = () => app.set({ epEditor: null, dropdown: null, projQuery: 
 app.saveEpEditor = async () => {
   const e = state.epEditor; if (!e) return;
   const patch = { name: e.name };
-  if (e.type === 'inspector') { patch.slug = e.slug; patch.forwardTarget = e.forwardTarget || null; }
+  if (e.protocol !== 'http') patch.slug = e.slug;
+  else if (e.type === 'inspector') { patch.slug = e.slug; patch.forwardTarget = e.forwardTarget || null; }
   else { patch.method = e.method; patch.path = e.path; }
   if (e.projectName && e.projectName.trim()) patch.projectName = e.projectName.trim();
   else patch.projectId = null;
@@ -350,7 +466,7 @@ app.saveEpEditor = async () => {
     toast('Changes saved');
   } catch (err) { state.epEditor.error = err.fields || { name: err.message }; render(); }
 };
-app.askDeleteEp = (ep) => app.set({ dropdown: null, epConfirmDelete: { id: ep.id, name: ep.name, type: ep.type } });
+app.askDeleteEp = (ep) => app.set({ dropdown: null, epConfirmDelete: { id: ep.id, name: ep.name, type: ep.type, protocol: ep.protocol || 'http' } });
 app.cancelDeleteEp = () => app.set({ epConfirmDelete: null });
 app.confirmDeleteEp = async () => {
   const t = state.epConfirmDelete; if (!t) return;
@@ -358,7 +474,7 @@ app.confirmDeleteEp = async () => {
     await api.del('/endpoints/' + t.id);
     if (state.activeEp && state.activeEp.id === t.id) state.activeEp = null;
     await loadEndpoints(); await loadCounts();
-    app.set({ epConfirmDelete: null, route: t.type === 'mock' ? 'mocks' : 'webhooks' });
+    app.set({ epConfirmDelete: null, route: endpointListRoute(t) });
   } catch (err) { app.set({ epConfirmDelete: null }); toast(err.message); }
 };
 
@@ -425,8 +541,9 @@ app.clearFeed = async () => { await api.del('/endpoints/' + state.activeEp.id + 
 
 // ---------------- mock config ----------------
 app.setMockTab = async (tab) => {
-  state.mockTab = tab; state.mockReqSelected = null;
+  state.mockTab = tab; state.mockReqSelected = null; state.selectedDeliveryRun = null;
   if (tab === 'requests') { state.feedFilter = { search: '', method: 'ALL' }; await reloadFeed(); }
+  if (tab === 'deliveries') { await loadDeliveryRuns(); }
   syncHash(); render();
 };
 app.activateScenario = async (scId) => { await api.post('/scenarios/' + scId + '/activate'); await app.reloadActiveEp(); render(); };
@@ -464,7 +581,7 @@ app.openAddRule = () => {
   app.set({ addRuleOpen: true, addScenarioOpen: false, newRule: { when: 'header', key: '', op: 'equals', value: '', then: first ? first.id : '' } });
 };
 app.cancelAddRule = () => app.set({ addRuleOpen: false });
-app.setNewRule = (k, v) => { state.newRule[k] = v; if (k === 'when' || k === 'op') render(); };
+app.setNewRule = (k, v) => { state.newRule[k] = v; return k === 'when' || k === 'op'; };
 app.addRule = async () => {
   const nr = state.newRule;
   await api.post('/endpoints/' + state.activeEp.id + '/match-rules', nr);
@@ -478,13 +595,409 @@ app.selectMockReq = async (id) => { state.mockReqSelected = await api.get('/requ
 app.backToMockReqs = () => { state.mockReqSelected = null; syncHash(); render(); };
 app.setMockReqTab = (t) => { state.mockReqTab = t; syncHash(); render(); };
 
+function newScenarioEventEditor(scenarioId) {
+  return {
+    id: null, scenarioId, name: 'Async event', enabled: true, headersText: '{}',
+    request: {
+      url: '', method: 'POST', headers: {}, contentType: 'application/json', payload: '', timeoutMs: 10000,
+      auth: { enabled: false, method: 'none', header: 'Authorization', token: '', apiKeyName: 'X-Api-Key', apiKeyLoc: 'header', user: '', pass: '' },
+      hmac: { enabled: false, provider: 'custom', secret: '', algo: 'sha256', header: 'X-Signature', encoding: 'hex' },
+    },
+    schedule: { delayMs: 0, repeatCount: 1, repeatIntervalMs: 0, retryCount: 0, retryBaseDelayMs: 250 },
+  };
+}
+function editorFromScenarioEvent(event) {
+  const copy = JSON.parse(JSON.stringify(event));
+  copy.headersText = JSON.stringify((copy.request && copy.request.headers) || {}, null, 2);
+  return copy;
+}
+function setNestedValue(root, path, value) {
+  const keys = path.split('.');
+  let target = root;
+  for (let index = 0; index < keys.length - 1; index++) target = target[keys[index]] || (target[keys[index]] = {});
+  target[keys[keys.length - 1]] = value;
+}
+app.openAddScenarioEvent = (scenarioId) => app.set({ eventEditor: newScenarioEventEditor(scenarioId), eventTest: null });
+app.openEditScenarioEvent = (event) => app.set({ eventEditor: editorFromScenarioEvent(event), eventTest: null });
+app.closeScenarioEventEditor = () => app.set({ eventEditor: null });
+app.setScenarioEventField = (path, value, rerender = false) => {
+  if (!state.eventEditor) return;
+  setNestedValue(state.eventEditor, path, value);
+  return rerender;
+};
+app.refreshScenarioEventPreview = () => render();
+app.setScenarioHmacProvider = (provider) => {
+  if (!state.eventEditor) return;
+  const presets = {
+    stripe: { algo: 'sha256', header: 'Stripe-Signature', encoding: 'hex' },
+    github: { algo: 'sha256', header: 'X-Hub-Signature-256', encoding: 'hex' },
+    shopify: { algo: 'sha256', header: 'X-Shopify-Hmac-Sha256', encoding: 'base64' },
+    twilio: { algo: 'sha1', header: 'X-Twilio-Signature', encoding: 'base64' },
+    slack: { algo: 'sha256', header: 'X-Slack-Signature', encoding: 'hex' },
+    custom: { algo: 'sha256', header: 'X-Signature', encoding: 'hex' },
+  };
+  Object.assign(state.eventEditor.request.hmac, { provider, ...(presets[provider] || {}) });
+  return true;
+};
+app.saveScenarioEvent = async () => {
+  const editor = state.eventEditor;
+  if (!editor) return;
+  let headers;
+  try {
+    headers = JSON.parse(editor.headersText || '{}');
+    if (!headers || typeof headers !== 'object' || Array.isArray(headers)) throw new Error('Headers must be a JSON object');
+  } catch (error) {
+    toast(error.message || 'Headers must be valid JSON');
+    return;
+  }
+  const payload = {
+    name: editor.name, enabled: !!editor.enabled,
+    request: { ...editor.request, headers }, schedule: editor.schedule,
+  };
+  try {
+    if (editor.id) await api.patch('/scenario-events/' + editor.id, payload);
+    else await api.post('/scenarios/' + editor.scenarioId + '/events', payload);
+    state.eventEditor = null;
+    await app.reloadActiveEp();
+    render();
+    toast(editor.id ? 'Async event saved' : 'Async event created');
+  } catch (error) { toast(error.message || 'Could not save async event'); }
+};
+app.toggleScenarioEvent = async (event) => {
+  try {
+    await api.patch('/scenario-events/' + event.id, { enabled: !event.enabled });
+    await app.reloadActiveEp(); render();
+  } catch (error) { toast(error.message); }
+};
+app.moveScenarioEvent = async (id, direction) => {
+  try {
+    await api.post('/scenario-events/' + id + '/move', { direction });
+    await app.reloadActiveEp(); render();
+  } catch (error) { toast(error.message); }
+};
+app.deleteScenarioEvent = async (id) => {
+  try {
+    await api.del('/scenario-events/' + id);
+    await app.reloadActiveEp(); render(); toast('Async event deleted');
+  } catch (error) { toast(error.message); }
+};
+app.openEventTest = (scenarioId) => {
+  const request = { method: 'POST', path: '/orders/ord_preview', headers: { 'x-request-id': 'preview-request' }, query: { ref: 'preview-ref' }, body: { order: { id: 'ord_preview' } } };
+  const response = { status: 202, headers: { 'content-type': 'application/json' }, body: { id: 'mock_preview', state: 'accepted' } };
+  app.set({ eventEditor: null, eventTest: { scenarioId, requestText: JSON.stringify(request, null, 2), responseText: JSON.stringify(response, null, 2), error: '' } });
+};
+app.closeEventTest = () => app.set({ eventTest: null });
+app.setEventTestField = (field, value) => { if (state.eventTest) { state.eventTest[field] = value; state.eventTest.error = ''; } };
+app.runEventTest = async () => {
+  const test = state.eventTest;
+  if (!test) return;
+  let request, response;
+  try {
+    request = JSON.parse(test.requestText || '{}');
+    response = JSON.parse(test.responseText || '{}');
+  } catch {
+    state.eventTest.error = 'Fixtures must be valid JSON objects.';
+    render();
+    return;
+  }
+  try {
+    const run = await api.post('/scenarios/' + test.scenarioId + '/event-runs/test', { request, response });
+    state.eventTest = null; state.mockTab = 'deliveries'; state.selectedDeliveryRun = run;
+    state.mockDeliveries = [run, ...(state.mockDeliveries || []).filter((item) => item.id !== run.id)];
+    syncHash(); render();
+    toast('Test flow queued');
+  } catch (error) {
+    state.eventTest.error = error.message || 'Could not start test flow';
+    render();
+  }
+};
+app.refreshDeliveryRuns = async () => {
+  try { await loadDeliveryRuns(); render(); } catch (error) { toast(error.message || 'Could not load deliveries'); }
+};
+app.selectDeliveryRun = async (id) => {
+  try { state.selectedDeliveryRun = await api.get('/event-runs/' + id); render(); }
+  catch (error) { toast(error.message || 'Could not load delivery'); }
+};
+app.backToDeliveries = () => { state.selectedDeliveryRun = null; render(); };
+app.cancelDeliveryRun = async (id) => {
+  try {
+    state.selectedDeliveryRun = await api.post('/event-runs/' + id + '/cancel', {});
+    await loadDeliveryRuns(); render(); toast('Pending deliveries cancelled');
+  } catch (error) { toast(error.message || 'Could not cancel delivery'); }
+};
+
+// ---------------- realtime protocols ----------------
+function parseJson(value, label) {
+  try { return JSON.parse(value); }
+  catch { throw new Error(`${label} must be valid JSON`); }
+}
+function parseJsonOrText(value) {
+  try { return JSON.parse(value); }
+  catch { return value; }
+}
+function actionForApi(action = {}) {
+  const type = action.type || 'send';
+  const result = { type, delayMs: Number(action.delayMs) || 0 };
+  if (type === 'close') {
+    result.code = Number(action.code) || 1000;
+    result.reason = action.reason || '';
+  } else {
+    result.payload = action.payloadText == null ? action.payload : parseJsonOrText(action.payloadText);
+    if (type === 'emit') result.event = action.event || '';
+  }
+  return result;
+}
+function scriptForApi(script) {
+  return { name: script.name, enabled: !!script.enabled, connectActions: (script.connectActions || []).map(actionForApi) };
+}
+function stepForApi(step, endpoint) {
+  const raw = step.matchText == null ? ((step.match && step.match.text) || '') : step.matchText;
+  const match = {
+    kind: endpoint.protocol === 'socketio' ? 'event' : 'message',
+    event: endpoint.protocol === 'socketio' ? ((step.match && step.match.event) || 'message') : '',
+    text: '', payload: null,
+  };
+  try { match.payload = JSON.parse(raw); }
+  catch { match.text = raw; }
+  return { match, actions: (step.actions || []).map(actionForApi) };
+}
+function fixtureForApi(fixture) {
+  const variablesText = String(fixture.variablesText == null ? '' : fixture.variablesText).trim();
+  return {
+    name: fixture.name, operationName: fixture.operationName || '', documentHash: fixture.documentHash || '',
+    operationType: fixture.operationType || 'query',
+    variablesMatch: variablesText ? parseJson(variablesText, 'Variables matcher') : null,
+    response: fixture.responseText == null ? fixture.response || {} : parseJson(fixture.responseText, 'GraphQL response'),
+    subscriptionEvents: fixture.eventsText == null ? fixture.subscriptionEvents || [] : parseJson(fixture.eventsText, 'Subscription events'),
+    delayMs: Number(fixture.delayMs) || 0, enabled: !!fixture.enabled,
+  };
+}
+async function refreshRealtime() {
+  await app.reloadActiveEp();
+  await loadRealtimeData();
+  await loadEndpoints();
+  await loadCounts();
+}
+function realtimeFailure(error) {
+  state.realtimeError = error && error.message || 'Could not update realtime endpoint';
+  toast(state.realtimeError);
+  render();
+}
+
+let graphqlValidationTimer = null;
+let graphqlValidationSequence = 0;
+app.validateGraphqlSdl = (value, editor, onResult) => {
+  const source = String(value == null ? '' : value);
+  const sequence = ++graphqlValidationSequence;
+  clearTimeout(graphqlValidationTimer);
+  if (editor && editor.setExternalValidation) editor.setExternalValidation({ source, pending: true });
+  graphqlValidationTimer = setTimeout(async () => {
+    let result;
+    try {
+      result = await api.post('/graphql/validate', { sdl: source });
+    } catch {
+      result = { valid: false, message: 'SDL validation is unavailable. Save will validate again.', line: 1, column: 1 };
+    }
+    if (sequence !== graphqlValidationSequence) return;
+    const validation = { source, ...result };
+    if (state.route === 'realtime' && state.realtimeSchema && state.realtimeSchema.sdl === source) state.realtimeSchemaValidation = validation;
+    if (onResult) onResult(validation);
+    // Apply the result directly to the existing editor. A render here would
+    // recreate its textarea and interrupt the user's cursor while typing.
+    if (editor && editor.isConnected !== false && editor.value === source && editor.setExternalValidation) editor.setExternalValidation(validation);
+  }, 220);
+};
+
+app.newRealtime = (protocol = 'websocket') => {
+  state.form.realtime = {
+    protocol, type: 'mock', name: '', slug: '', projectName: '',
+    sdl: 'type Query { health: String }', sdlValidation: { source: 'type Query { health: String }', valid: true }, errors: {}, submitted: false,
+  };
+  state.realtimeSchemaValidation = null;
+  setRoute('new-realtime');
+};
+app.setMockProtocolFilter = (protocol) => app.set({ mockProtocolFilter: protocol });
+app.setRealtimeForm = (key, value) => {
+  state.form.realtime[key] = value;
+  if (key === 'protocol' && value === 'graphql' && !state.form.realtime.sdl) state.form.realtime.sdl = 'type Query { health: String }';
+  render();
+};
+app.createRealtime = async () => {
+  const form = state.form.realtime;
+  try {
+    const endpoint = await api.post('/endpoints', {
+      protocol: form.protocol, type: form.type, name: form.name, slug: form.slug,
+      projectName: form.projectName || undefined, sdl: form.protocol === 'graphql' ? form.sdl : undefined,
+    });
+    await loadEndpoints(); await loadCounts();
+    await app.openEndpoint(endpoint);
+  } catch (error) {
+    form.errors = error.fields || { name: error.message };
+    form.submitted = true;
+    toast(error.message || 'Could not create endpoint');
+    render();
+  }
+};
+app.setRealtimeTab = async (tab) => {
+  state.realtimeTab = tab;
+  state.realtimeError = '';
+  syncHash(); render();
+};
+app.selectRealtimeSession = async (id) => {
+  try { state.realtimeSelectedSession = await api.get('/realtime-sessions/' + id); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.disconnectRealtimeSession = async (id) => {
+  try {
+    await api.post('/realtime-sessions/' + id + '/disconnect', {});
+    await loadRealtimeData(); render();
+    toast('Session disconnected');
+  } catch (error) { realtimeFailure(error); }
+};
+app.clearRealtimeSessions = async (endpointId) => {
+  try {
+    await api.del('/endpoints/' + endpointId + '/realtime-sessions');
+    state.realtimeSessions = []; state.realtimeSelectedSession = null;
+    render(); toast('Realtime history cleared');
+  } catch (error) { realtimeFailure(error); }
+};
+app.addRealtimeScript = async (endpointId) => {
+  try {
+    await api.post('/endpoints/' + endpointId + '/realtime-scripts', { name: 'Conversation', enabled: true, connectActions: [] });
+    await loadRealtimeData(); render();
+  } catch (error) { realtimeFailure(error); }
+};
+app.saveRealtimeScript = async (script) => {
+  try {
+    await api.patch('/realtime-scripts/' + script.id, scriptForApi(script));
+    await loadRealtimeData(); render(); toast('Script saved');
+  } catch (error) { realtimeFailure(error); }
+};
+app.deleteRealtimeScript = async (id) => {
+  try { await api.del('/realtime-scripts/' + id); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.moveRealtimeScript = async (id, direction) => {
+  try { await api.post('/realtime-scripts/' + id + '/move', { direction }); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.addRealtimeStep = async (scriptId) => {
+  const endpoint = state.activeEp;
+  try {
+    await api.post('/realtime-scripts/' + scriptId + '/steps', {
+      match: endpoint.protocol === 'socketio'
+        ? { kind: 'event', event: 'message', payload: {} }
+        : { kind: 'message', payload: {} },
+      actions: [{ type: endpoint.protocol === 'socketio' ? 'emit' : 'send', event: endpoint.protocol === 'socketio' ? 'message' : undefined, payload: {}, delayMs: 0 }],
+    });
+    await loadRealtimeData(); render();
+  } catch (error) { realtimeFailure(error); }
+};
+app.saveRealtimeStep = async (step) => {
+  try {
+    await api.patch('/realtime-steps/' + step.id, stepForApi(step, state.activeEp));
+    await loadRealtimeData(); render(); toast('Step saved');
+  } catch (error) { realtimeFailure(error); }
+};
+app.deleteRealtimeStep = async (id) => {
+  try { await api.del('/realtime-steps/' + id); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.moveRealtimeStep = async (id, direction) => {
+  try { await api.post('/realtime-steps/' + id + '/move', { direction }); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.saveGraphqlSchema = async () => {
+  try {
+    state.realtimeSchema = await api.put('/endpoints/' + state.activeEp.id + '/graphql/schema', { sdl: state.realtimeSchema.sdl });
+    state.realtimeSchemaValidation = { source: state.realtimeSchema.sdl, valid: true };
+    state.realtimeError = ''; render(); toast('SDL saved');
+  } catch (error) {
+    state.realtimeSchemaValidation = {
+      source: state.realtimeSchema && state.realtimeSchema.sdl || '',
+      valid: false,
+      message: error.fields && error.fields.sdl || error.message || 'Invalid GraphQL SDL',
+      line: 1,
+      column: 1,
+    };
+    realtimeFailure(error);
+  }
+};
+app.addGraphqlFixture = async (endpointId, operationType = 'query') => {
+  try {
+    await api.post('/endpoints/' + endpointId + '/graphql/fixtures', {
+      name: operationType === 'subscription' ? 'Subscription fixture' : 'Operation fixture', operationType,
+      response: { data: {} }, subscriptionEvents: [], enabled: true,
+    });
+    await loadRealtimeData(); render();
+  } catch (error) { realtimeFailure(error); }
+};
+app.saveGraphqlFixture = async (fixture) => {
+  try {
+    await api.patch('/graphql-fixtures/' + fixture.id, fixtureForApi(fixture));
+    await loadRealtimeData(); render(); toast('Fixture saved');
+  } catch (error) { realtimeFailure(error); }
+};
+app.deleteGraphqlFixture = async (id) => {
+  try { await api.del('/graphql-fixtures/' + id); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.moveGraphqlFixture = async (id, direction) => {
+  try { await api.post('/graphql-fixtures/' + id + '/move', { direction }); await loadRealtimeData(); render(); }
+  catch (error) { realtimeFailure(error); }
+};
+app.openRealtimeTest = () => {
+  const graph = state.activeEp && state.activeEp.protocol === 'graphql';
+  if (graph) state.realtimeTab = 'operations';
+  else if (!['sessions', 'messages'].includes(state.realtimeTab)) state.realtimeTab = 'sessions';
+  state.realtimeTest = graph
+    ? { input: 'query Health { health }', variables: '{}', error: '' }
+    : { input: state.activeEp && state.activeEp.protocol === 'socketio' ? '[{ "event": "message", "payload": {} }]' : '[{}]', variables: '', error: '' };
+  state.realtimeTestResult = null;
+  syncHash();
+  render();
+};
+app.closeRealtimeTest = () => { state.realtimeTest = null; state.realtimeTestResult = null; render(); };
+app.runRealtimeTest = async () => {
+  const test = state.realtimeTest;
+  if (!test || !state.activeEp) return;
+  try {
+    const body = state.activeEp.protocol === 'graphql'
+      ? { query: test.input, variables: parseJson(test.variables || '{}', 'Variables') }
+      : { messages: parseJson(test.input || '[]', 'Messages') };
+    if (state.activeEp.protocol !== 'graphql' && !Array.isArray(body.messages)) throw new Error('Messages must be a JSON array');
+    const session = await api.post('/endpoints/' + state.activeEp.id + '/realtime-test', body);
+    state.realtimeTestResult = session;
+    state.realtimeSelectedSession = session;
+    await loadRealtimeData(); render(); toast('Test flow completed');
+  } catch (error) {
+    test.error = error.message || 'Could not run test flow';
+    state.realtimeError = test.error; render();
+  }
+};
+app.saveRealtimeSettings = async () => {
+  const current = state.activeEp && state.activeEp.config && state.activeEp.config.realtime;
+  if (!current) return;
+  const originsText = current._originsText == null ? (current.allowedOrigins || []).join('\n') : current._originsText;
+  const realtime = {
+    ...current,
+    allowedOrigins: String(originsText).split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+  };
+  delete realtime._originsText;
+  try {
+    state.activeEp = await api.patch('/endpoints/' + state.activeEp.id, { realtime });
+    state.realtimeError = '';
+    await refreshRealtime(); render(); toast('Realtime settings saved');
+  } catch (error) { realtimeFailure(error); }
+};
+
 // ---------------- settings ----------------
 app.navSettings = async () => {
   state.settingsRequests = [];
   if (state.activeEp) { try { state.settingsRequests = await api.get('/endpoints/' + state.activeEp.id + '/requests?limit=25'); } catch { /* ignore */ } }
   setRoute('settings', { settingsTab: 'auth', secretReveal: false });
 };
-app.backFromSettings = () => setRoute(state.activeEp && state.activeEp.type === 'mock' ? 'mock' : 'inspector');
+app.backFromSettings = () => setRoute(isRealtimeEndpoint(state.activeEp) ? 'realtime' : state.activeEp && state.activeEp.type === 'mock' ? 'mock' : 'inspector');
 app.setSettingsTab = (t) => { state.settingsTab = t; syncHash(); render(); };
 app.toggleSecret = () => app.set({ secretReveal: !state.secretReveal });
 let cfgTimer = null;
@@ -501,7 +1014,13 @@ app.applyHmacProvider = async (provider) => {
   app.patchConfig('hmac', { provider, ...(presets[provider] || {}) }, true);
 };
 app.addCfgRule = () => { const rules = state.activeEp.config.rules.concat([{ id: 'r' + Date.now(), enabled: true, field: 'header', key: '', op: 'equals', value: '', action: 'forward' }]); state.activeEp.config.rules = rules; api.patch('/endpoints/' + state.activeEp.id, { rules }).catch(() => {}); render(); };
-app.updateCfgRule = (id, key, val) => { const r = state.activeEp.config.rules.find((x) => x.id === id); if (r) { r[key] = val; scheduleRulesSave(); if (key === 'field' || key === 'action') render(); } };
+app.updateCfgRule = (id, key, val) => {
+  const rule = state.activeEp.config.rules.find((item) => item.id === id);
+  if (!rule) return false;
+  rule[key] = val;
+  scheduleRulesSave();
+  return key === 'field' || key === 'action';
+};
 app.toggleCfgRule = (id) => { const r = state.activeEp.config.rules.find((x) => x.id === id); if (r) { r.enabled = !r.enabled; saveRules(); render(); } };
 app.deleteCfgRule = (id) => { state.activeEp.config.rules = state.activeEp.config.rules.filter((x) => x.id !== id); saveRules(); render(); };
 let rulesTimer = null;
@@ -519,6 +1038,8 @@ app.toggleFunnel = async () => {
 
 // ---------------- create endpoints ----------------
 app.newWebhook = () => { state.form.insp = { name: '', slug: '', slugEdited: false, projectName: '', validate: false, provider: 'stripe', hmacSecret: '', errors: {}, submitted: false }; setRoute('new-inspector'); };
+app.chooseMockProtocol = () => setRoute('new-mock-protocol');
+app.backToMockProtocol = () => setRoute('new-mock-protocol');
 app.newMock = () => { state.form.mock = { name: '', projectName: '', method: 'POST', path: '/', status: 200, contentType: 'application/json', delay: 0, auth: 'none', authToken: '', authApiKeyName: 'X-Api-Key', authApiKeyLoc: 'header', authUser: '', authPass: '', body: '{\n  "ok": true\n}', errors: {}, submitted: false }; setRoute('new-mock'); };
 app.cancelNew = () => setRoute('webhooks');
 app.cancelNewMock = () => setRoute('mocks');
@@ -587,13 +1108,18 @@ function sidebar() {
   wsBtn.addEventListener('mouseenter', () => { wsBtn.style.background = '#161310'; });
   wsBtn.addEventListener('mouseleave', () => { wsBtn.style.background = '#100e0b'; });
 
-  const wsMenu = state.wsMenuOpen ? wsMenuPanel() : null;
+  const wsMenu = state.wsMenuOpen ? wsMenuPanel(collapsed) : null;
 
   const counts = state.counts || {};
+  const activeMock = ['mocks', 'mock', 'new-mock', 'new-mock-protocol', 'new-realtime'].includes(state.route)
+    || (!!state.activeEp && isMockServerEndpoint(state.activeEp) && ['realtime', 'request', 'diff', 'settings'].includes(state.route));
+  const activeWebhook = ['webhooks', 'new-inspector', 'inspector'].includes(state.route)
+    || (!!state.activeEp && !isMockServerEndpoint(state.activeEp) && ['request', 'diff', 'settings'].includes(state.route));
+  const mockCount = state.endpoints.filter(isMockServerEndpoint).length;
   const nav = h('nav', { style: 'padding:0 12px;display:flex;flex-direction:column;gap:2px' },
     navBtn('Dashboard', icons.dashboard, state.route === 'dashboard', app.navDashboard),
-    navBtn('Webhooks', icons.webhook, ['webhooks', 'inspector', 'request', 'diff'].includes(state.route), app.navWebhooks, counts.webhooks),
-    navBtn('Mock Servers', icons.mock, ['mocks', 'mock'].includes(state.route), app.navMocks, counts.mocks));
+    navBtn('Webhooks', icons.webhook, activeWebhook, app.navWebhooks, counts.webhooks),
+    navBtn('Mock Servers', icons.mock, activeMock, app.navMocks, mockCount));
 
   const collapseBtn = h('button', {
     title: collapsed ? 'Expand' : 'Collapse',
@@ -610,7 +1136,13 @@ function sidebar() {
     h('div', { style: 'padding:8px 12px 12px 12px' }, collapseBtn));
 }
 
-function wsMenuPanel() {
+function wsMenuPanel(collapsed = false) {
+  // A menu inside the 68 px collapsed rail cannot retain its readable rows.
+  // Keep the expanded layout anchored below its trigger, but let the compact
+  // rail open a bounded popover alongside it instead.
+  const panelStyle = collapsed
+    ? 'position:fixed;left:80px;top:12px;z-index:41;box-sizing:border-box;width:min(320px,calc(100vw - 92px));max-height:calc(100vh - 24px);overflow:auto;background:#1a1712;border-radius:var(--radius-md);padding:7px;box-shadow:0 20px 48px rgba(0,0,0,0.62);animation:sd-in .12s ease'
+    : 'position:absolute;left:12px;right:12px;top:calc(100% - 4px);z-index:41;background:#1a1712;border-radius:var(--radius-md);padding:7px;box-shadow:0 20px 48px rgba(0,0,0,0.62);animation:sd-in .12s ease';
   const items = state.workspaces.map((w) => {
     const row = h('div', { style: 'display:flex;align-items:center;gap:4px;padding:5px 6px 5px 8px;border-radius:var(--radius-sm)' },
       h('button', { style: 'flex:1;min-width:0;display:flex;align-items:center;gap:9px;background:transparent;text-align:left;cursor:pointer', onclick: () => app.selectWorkspace(w.id) },
@@ -633,17 +1165,17 @@ function wsMenuPanel() {
 
   return h('div', {},
     h('div', { style: 'position:fixed;inset:0;z-index:40', onclick: app.closeWsMenu }),
-    h('div', { style: 'position:absolute;left:12px;right:12px;top:calc(100% - 4px);z-index:41;background:#1a1712;border-radius:var(--radius-md);padding:7px;box-shadow:0 20px 48px rgba(0,0,0,0.62);animation:sd-in .12s ease' },
+    h('div', { style: panelStyle },
       h('div', { style: 'padding:7px 9px 6px 9px;font-size:10.5px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#5c574e' }, 'Workspaces'),
       ...items,
       h('div', { style: 'height:1px;background:#2a251e;margin:6px 6px' }),
       createBtn));
 }
 
-function header() {
-  const crumbRoot = { dashboard: 'Overview', webhooks: 'Webhooks', mocks: 'Mock Servers', tailscale: 'Tailscale', 'new-inspector': 'Webhooks', 'new-mock': 'Mock Servers' }[state.route]
-    || (state.activeEp ? (state.activeEp.type === 'mock' ? 'Mock Servers' : 'Webhooks') : 'Sidedoor');
-  const hasCrumb = ['inspector', 'request', 'diff', 'mock', 'settings'].includes(state.route) && state.activeEp;
+function header(navigationChanged = false) {
+  const crumbRoot = { dashboard: 'Overview', webhooks: 'Webhooks', mocks: 'Mock Servers', tailscale: 'Tailscale', 'new-inspector': 'Webhooks', 'new-mock': 'Mock Servers', 'new-mock-protocol': 'Mock Servers', 'new-realtime': 'Mock Servers' }[state.route]
+    || (state.activeEp ? (isMockServerEndpoint(state.activeEp) ? 'Mock Servers' : 'Webhooks') : 'Sidedoor');
+  const hasCrumb = ['inspector', 'request', 'diff', 'mock', 'settings', 'realtime'].includes(state.route) && state.activeEp;
   const funnelActive = state.funnel.state && state.funnel.state.active;
   const funnelHost = (state.funnel.state && state.funnel.state.base_url) ? state.funnel.state.base_url.replace(/^https?:\/\//, '') : (state.baseUrls.local || '').replace(/^https?:\/\//, '');
   const dot = h('span', { style: `width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${funnelActive ? '#238636' : '#4c473f'};${funnelActive ? 'box-shadow:0 0 0 3px rgba(35,134,54,0.15)' : ''}` });
@@ -653,7 +1185,7 @@ function header() {
   funnelBtn.addEventListener('mouseleave', () => { funnelBtn.style.background = '#191712'; });
 
   return h('header', { style: 'display:flex;align-items:center;justify-content:space-between;padding:0 28px;height:54px;flex-shrink:0;background:#100e0b' },
-    h('div', { style: 'display:flex;align-items:center;gap:9px;min-width:0' },
+    h('div', { class: navigationChanged ? 'sd-navigation-chrome-enter' : '', style: 'display:flex;align-items:center;gap:9px;min-width:0' },
       h('span', { style: 'font-size:13.5px;font-weight:500;color:#948d83' }, crumbRoot),
       hasCrumb ? raw(icons.chevRight({ w: 14, stroke: '#4c473f', sw: 1.7 })) : null,
       hasCrumb ? h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#cfc8bc" }, state.activeEp.name) : null),
@@ -673,6 +1205,9 @@ function mainBody() {
     case 'tailscale': return tailscaleScreen(app);
     case 'new-inspector': return newInspectorScreen(app);
     case 'new-mock': return newMockScreen(app);
+    case 'new-mock-protocol': return mockProtocolPickerScreen(app);
+    case 'new-realtime': return newRealtimeScreen(app);
+    case 'realtime': return realtimeScreen(app);
     default: return h('div', {}, 'Not found');
   }
 }
@@ -684,13 +1219,6 @@ function mainBody() {
 // same view" (and restore scroll) when none of these route-level
 // discriminators changed; a genuine navigation still starts scrolled to top.
 let lastViewKey = null;
-function computeViewKey() {
-  return [
-    state.route, state.activeEp && state.activeEp.id, state.mockTab,
-    state.settingsTab, state.detailTab, state.mockReqTab,
-    state.activeReq && state.activeReq.id,
-  ].join('|');
-}
 
 // Several screens (settings, mock config, request/diff, forms, tailscale)
 // wrap their content in their own `height:100%;overflow-y:auto` div, which is
@@ -710,8 +1238,10 @@ function scrollScopeEl(root) {
 function render() {
   const root = document.getElementById('app');
   if (!root) return;
-  const viewKey = computeViewKey();
+  closeFloatingPanels();
+  const viewKey = navigationViewKey(state);
   const sameView = lastViewKey === viewKey;
+  const navigationChanged = isNavigationChange(lastViewKey, viewKey);
   const prevMain = sameView ? scrollScopeEl(root) : null;
   const mainScroll = prevMain ? prevMain.scrollTop : 0;
   const prevFeed = sameView ? document.getElementById('feed-scroll') : null;
@@ -723,11 +1253,11 @@ function render() {
     lastViewKey = viewKey;
     return;
   }
-  root.appendChild(h('div', { style: rootGridStyle() },
+  root.appendChild(h('div', { class: 'sd-app-shell', style: rootGridStyle() },
     sidebar(),
     h('div', { style: 'display:flex;flex-direction:column;min-width:0;height:100vh;overflow:hidden' },
-      header(),
-      h('main', { style: 'flex:1;min-height:0;overflow:auto' }, mainBody()))));
+      header(navigationChanged),
+      h('main', { class: navigationChanged ? 'sd-route-enter' : '', 'data-sd-navigation': navigationChanged ? 'enter' : 'stable', style: 'flex:1;min-height:0;overflow:auto' }, mainBody()))));
   if (state.wsEditor) root.appendChild(workspaceEditor(app));
   if (state.wsConfirmDelete) root.appendChild(workspaceDeleteConfirm(app));
   if (state.epEditor) root.appendChild(endpointEditor(app));

@@ -33,6 +33,35 @@ export function compute(algo, secret, payload, encoding) {
   return h.digest(encoding);
 }
 
+// Build an outbound signature using the same provider presets used for
+// inbound verification. This deliberately returns only request headers; the
+// secret and the computed signature never enter delivery history.
+export function buildOutboundHmacHeaders(cfg, { body = '', now = Date.now() } = {}) {
+  if (!cfg || !cfg.enabled) return {};
+  const secret = cfg.secret || '';
+  if (!secret) throw new Error('HMAC secret is required');
+  const preset = presetFor(cfg.provider);
+  const algo = cfg.algo || preset.algo;
+  const encoding = cfg.encoding || preset.encoding;
+  const header = cfg.header || preset.header;
+  const timestamp = String(Math.floor(Number(now) / 1000));
+  let signature;
+  const output = {};
+
+  if (preset.scheme === 'stripe') {
+    signature = `t=${timestamp},v1=${compute(algo, secret, `${timestamp}.${body}`, encoding)}`;
+  } else if (preset.scheme === 'slack') {
+    signature = `${preset.prefix || 'v0='}${compute(algo, secret, `v0:${timestamp}:${body}`, encoding)}`;
+    output['X-Slack-Request-Timestamp'] = timestamp;
+  } else {
+    signature = compute(algo, secret, body, encoding);
+    if (preset.scheme === 'prefix' && preset.prefix) signature = preset.prefix + signature;
+  }
+
+  output[header] = signature;
+  return output;
+}
+
 function safeEqual(a, b) {
   const ba = Buffer.from(String(a));
   const bb = Buffer.from(String(b));

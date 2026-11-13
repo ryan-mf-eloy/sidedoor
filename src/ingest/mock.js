@@ -4,6 +4,8 @@
 import { verifyAuth, failStatus } from '../lib/auth.js';
 import { resolveScenarioRule } from '../lib/match.js';
 import { clampStatus } from './handler.js';
+import { allowedMethods, methodMatches, pathMatches, renderScenarioBody } from '../lib/mockPath.js';
+import { buildEventContext } from '../lib/eventTemplate.js';
 
 const JSON_H = { 'Content-Type': 'application/json' };
 const MAX_DELAY = 60000;
@@ -47,16 +49,15 @@ export async function handleMock(ctx, ep, rc, respond) {
     return row;
   };
 
-  // 0. Method + path must match exactly what this mock was created for — a
-  // mock simulates one specific real-API call shape, unlike a webhook (which
-  // deliberately captures anything sent to it, including arbitrary subpaths).
-  if (ep.method && rc.method !== ep.method) {
-    respond(405, { ...JSON_H, Allow: ep.method }, JSON.stringify({ error: 'method_not_allowed', expected: ep.method }));
+  // 0. Method + path must match this mock's configured shape (exact or prefix).
+  if (!methodMatches(ep, rc.method)) {
+    const allow = allowedMethods(ep).join(', ') || ep.method || '';
+    respond(405, { ...JSON_H, Allow: allow }, JSON.stringify({ error: 'method_not_allowed', expected: allow }));
     capture({ status: 405, responseStatus: 405, outcome: 'unmatched', eventLabel: 'Method not allowed' });
     return;
   }
-  if (rc.subpath && rc.subpath !== '/' && rc.subpath !== ep.path) {
-    respond(404, JSON_H, JSON.stringify({ error: 'not_found', expected: ep.path }));
+  if (ep.path && !pathMatches(ep, rc.subpath || '/')) {
+    respond(404, JSON_H, JSON.stringify({ error: 'not_found', expected: ep.path, pathMode: ep.path_mode || 'exact' }));
     capture({ status: 404, responseStatus: 404, outcome: 'unmatched', eventLabel: 'Path not found' });
     return;
   }
@@ -84,7 +85,7 @@ export async function handleMock(ctx, ep, rc, respond) {
   }
 
   // 3. Scenario resolution
-  const mctx = { method: rc.method, path: rc.path, headers: rc.headers, query: rc.query, bodyObj: rc.bodyObj };
+  const mctx = { method: rc.method, path: rc.path, subpath: rc.subpath, headers: rc.headers, query: rc.query, bodyObj: rc.bodyObj };
   const { scenario } = pickScenario(store, ep, mctx);
   if (!scenario) {
     respond(200, JSON_H, JSON.stringify({}));
@@ -99,10 +100,40 @@ export async function handleMock(ctx, ep, rc, respond) {
   // 5. Respond with the scenario
   const st = clampStatus(scenario.status, 200);
   const headers = scenarioHeaders(scenario);
-  const body = scenario.body == null ? '' : String(scenario.body);
+  const body = scenario.body == null ? '' : renderScenarioBody(String(scenario.body), mctx);
   respond(st, headers, body);
-  capture({
+  const captured = capture({
     status: st, responseStatus: st, responseHeaders: headers, responseBody: body,
     outcome: 'mock', scenarioId: scenario.id, eventLabel: scenario.name,
   });
+  // The response has been written and its valid call captured before event
+  // work begins. Scheduling only persists jobs and wakes the dispatcher; it
+  // never waits for an outbound connection on the mock request path.
+  try {
+    const scenarioEvents = store.listScenarioEvents(scenario.id).filter((event) => event.enabled);
+    const run = store.createEventRun({
+      endpointId: ep.id,
+      scenarioId: scenario.id,
+      requestId: captured.id,
+      source: 'ingest',
+      events: scenarioEvents,
+      context: buildEventContext({
+        request: {
+          method: rc.method, path: rc.path, subpath: rc.subpath, headers: rc.headers,
+          query: rc.query, body: rc.rawBody, bodyJson: rc.bodyObj,
+        },
+        response: { status: st, headers, body },
+      }),
+    });
+    if (run) {
+      ctx.events.broadcast('delivery', { endpointId: ep.id, run });
+      if (ctx.dispatcher) ctx.dispatcher.wake();
+    }
+  } catch (error) {
+    // A queue persistence problem must not replace a response that was already
+    // delivered successfully. The error is intentionally not enriched with
+    // request data, which may contain credentials.
+    // eslint-disable-next-line no-console
+    console.error('[sidedoor] event scheduling error:', error && error.message || error);
+  }
 }

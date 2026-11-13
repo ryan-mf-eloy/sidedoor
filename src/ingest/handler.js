@@ -4,6 +4,7 @@
 import { tryParse } from '../lib/json.js';
 import { handleWebhook } from './webhook.js';
 import { handleMock } from './mock.js';
+import { handleGraphqlHttp } from './graphql.js';
 
 function clientIp(req) {
   const xff = req.headers['x-forwarded-for'];
@@ -82,6 +83,10 @@ export function createIngestHandler(ctx) {
     };
 
     try {
+      if (ep.protocol === 'graphql') return await handleGraphqlHttp(ctx, ep, rc, respond);
+      if (ep.protocol !== 'http') {
+        return respond(426, { 'Content-Type': 'application/json', Upgrade: 'websocket' }, JSON.stringify({ error: 'upgrade_required', protocol: ep.protocol }));
+      }
       if (ep.type === 'mock') await handleMock(ctx, ep, rc, respond);
       else await handleWebhook(ctx, ep, rc, respond);
     } catch (e) {

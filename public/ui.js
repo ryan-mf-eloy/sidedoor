@@ -1,5 +1,9 @@
-// Shared UI helpers: a tiny hyperscript builder, formatters, colors, the JSON
-// highlighter (ported from the design's hlJSON), icons, and small components.
+// Shared UI helpers: a tiny hyperscript builder, formatters, colors, code
+// presentation, icons, and small components.
+import { codeStatus, detectCodeLanguage, escCode, formatCode, highlightCode, validateCode } from './code-format.js';
+import { activeTemplateAt, contextualTemplateSuggestions, insertTemplateSuggestion } from './template-assist.js';
+
+export { codeStatus, detectCodeLanguage, formatCode, highlightCode, validateCode } from './code-format.js';
 
 // ---- DOM builder ----
 export function h(tag, props, ...children) {
@@ -88,34 +92,38 @@ export function slugify(v) {
   return String(v || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function esc(s) { return escCode(s); }
 export { esc };
 
-// JSON syntax highlighter → HTML string (ported from design hlJSON).
+// Backward-compatible name for existing response views. Auto detection keeps
+// old JSON behavior while also making XML, GraphQL and HTTP payloads legible.
 export function hlJSON(obj) {
-  let json;
-  if (typeof obj === 'string') {
-    try { json = JSON.stringify(JSON.parse(obj), null, 2); } catch { return esc(obj); }
-  } else {
-    json = JSON.stringify(obj, null, 2);
-  }
-  if (json === undefined) json = '';
-  json = esc(json);
-  json = json.replace(/("(?:\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g, (m) => {
-    let color = '#d69a3c';
-    if (/^"/.test(m)) {
-      if (/:\s*$/.test(m)) return '<span style="color:#6a9fd4">' + m.replace(/:\s*$/, '') + '</span><span style="color:#57524a">:</span>';
-      color = '#8fb98a';
-    } else if (/^(true|false)$/.test(m)) color = '#b28de0';
-    else if (/^null$/.test(m)) color = '#e5675c';
-    return '<span style="color:' + color + '">' + m + '</span>';
-  });
-  return json;
+  const value = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  return highlightCode(value == null ? '' : value, 'auto');
 }
 
 export function pretty(objOrStr) {
   if (typeof objOrStr === 'string') { try { return JSON.stringify(JSON.parse(objOrStr), null, 2); } catch { return objOrStr; } }
   try { return JSON.stringify(objOrStr, null, 2); } catch { return String(objOrStr); }
+}
+
+// Read-only code surface with a consistent safe formatter and validity badge.
+// Callers can opt out of the compact badge when the surrounding layout already
+// names the representation (for example a small transcript row).
+export function codeBlock(value, opts = {}) {
+  const presentation = codeStatus(value == null ? '' : String(value), opts.language || 'auto');
+  const pre = h('pre', {
+    style: opts.style || "margin:0;background:#141210;border-radius:var(--radius-sm);padding:14px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:#c2bbb0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere",
+    html: highlightCode(presentation.formatted, presentation.language),
+  });
+  if (opts.showMeta === false) return pre;
+  const tone = presentation.valid ? '#6f9f78' : '#e08b7f';
+  return h('div', { style: opts.wrapperStyle || 'min-width:0' },
+    opts.label ? h('div', { style: 'font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#746d62;margin:0 0 6px' }, opts.label) : null,
+    h('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 6px' },
+      h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:10px;color:#746d62" }, presentation.label.toUpperCase()),
+      h('span', { style: `font-size:10.5px;color:${tone};overflow:hidden;text-overflow:ellipsis;white-space:nowrap` }, presentation.text)),
+    pre);
 }
 
 // ---- clipboard + toast ----
@@ -162,6 +170,7 @@ export const icons = {
   webhook: (o = {}) => svg('<path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/>', o),
   mock: (o = {}) => svg('<rect x="2.5" y="3" width="19" height="7.5" rx="2"/><rect x="2.5" y="13.5" width="19" height="7.5" rx="2"/><path d="M6.5 6.75h.01M6.5 17.25h.01"/>', o),
   dashboard: (o = {}) => svg('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>', o),
+  layers: (o = {}) => svg('<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>', o),
   chevDown: (o = {}) => svg('<path d="M6 9l6 6 6-6"/>', o),
   chevRight: (o = {}) => svg('<path d="M9 18l6-6-6-6"/>', o),
   chevLeft: (o = {}) => svg('<path d="M15 18l-6-6 6-6"/>', o),
@@ -210,64 +219,464 @@ export function kebabMenu(opts) {
   return wrap;
 }
 
-// ---- custom select (dropdown) ----
-// opts: { value, options:[{value,label,color?}], onPick, open, onToggle, onClose, mono, width, placeholder }
-// Only one select's dropdown panel is ever open at a time, tracked here (not
-// in app state) so opening a new one can close the previous without going
-// through app.set()/render().
+// ---- floating select / popover placement ----
+// A fixed layer avoids clipping inside scroll containers and never changes
+// document flow. It is shared by selects and richer pickers so all choices
+// open toward the side with the usable viewport space.
+export function floatingPlacement(rect, viewport, desiredHeight, opts = {}) {
+  const margin = opts.margin == null ? 8 : opts.margin;
+  const gap = opts.gap == null ? 6 : opts.gap;
+  const maxPreferred = opts.maxHeight || 280;
+  const desiredWidth = opts.preferredWidth == null ? rect.width || 0 : opts.preferredWidth;
+  const minWidth = Math.max(0, Number(opts.minWidth) || 0);
+  const width = Math.min(Math.max(minWidth, Number(desiredWidth) || 0), Math.max(0, viewport.width - margin * 2));
+  const below = Math.max(0, viewport.height - (rect.bottom || 0) - gap - margin);
+  const above = Math.max(0, (rect.top || 0) - gap - margin);
+  const direction = below >= Math.min(desiredHeight, maxPreferred) || below >= above ? 'down' : 'up';
+  const available = direction === 'down' ? below : above;
+  const maxHeight = Math.min(maxPreferred, available);
+  const height = Math.min(Math.max(0, desiredHeight), maxHeight);
+  const left = Math.max(margin, Math.min(rect.left || 0, viewport.width - margin - width));
+  const top = direction === 'down'
+    ? Math.min(viewport.height - margin, (rect.bottom || 0) + gap)
+    : Math.max(margin, (rect.top || 0) - gap - height);
+  return { direction, top, left, width, maxHeight };
+}
+
+const floatingClosers = new Set();
+export function closeFloatingPanels() {
+  for (const close of [...floatingClosers]) close();
+}
+
+function fallbackCaretRect(control) {
+  const rect = control && typeof control.getBoundingClientRect === 'function'
+    ? control.getBoundingClientRect()
+    : { left: 0, top: 0, width: 0, height: 20 };
+  const left = Number(rect.left) || 0;
+  const top = Number(rect.top) || 0;
+  const height = Math.max(16, Number(rect.height) || Number(rect.bottom) - top || 20);
+  return { left, top, width: 2, height, right: left + 2, bottom: top + height };
+}
+
+function textareaLineHeight(styles) {
+  const lineHeight = Number.parseFloat(styles && styles.lineHeight);
+  if (Number.isFinite(lineHeight) && lineHeight > 0) return lineHeight;
+  const fontSize = Number.parseFloat(styles && styles.fontSize);
+  return Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.6 : 20;
+}
+
+// Textareas do not expose a native caret rectangle. A short-lived invisible
+// mirror gives the portal a real viewport anchor without moving the page or
+// mutating the editor, including after soft wraps and local scrolling.
+export function textareaCaretRect(control) {
+  const fallback = fallbackCaretRect(control);
+  const doc = control && control.ownerDocument;
+  const view = doc && doc.defaultView;
+  if (!control || !doc || !doc.body || !view || typeof view.getComputedStyle !== 'function' || typeof doc.createElement !== 'function') return fallback;
+
+  const styles = view.getComputedStyle(control);
+  if (!styles) return fallback;
+  const mirror = doc.createElement('div');
+  const copiedStyles = [
+    'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontVariant', 'fontVariantLigatures',
+    'letterSpacing', 'wordSpacing', 'textTransform', 'textIndent', 'lineHeight',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'whiteSpace', 'wordBreak', 'overflowWrap', 'tabSize', 'MozTabSize',
+  ];
+  for (const property of copiedStyles) mirror.style[property] = styles[property];
+
+  const source = String(control.value == null ? '' : control.value);
+  const caret = Math.max(0, Math.min(source.length, Number(control.selectionStart) || 0));
+  const lineHeight = textareaLineHeight(styles);
+  const width = Math.max(1, Number(control.clientWidth) || fallback.width);
+  mirror.style.position = 'fixed';
+  mirror.style.left = `${fallback.left - (Number(control.scrollLeft) || 0)}px`;
+  mirror.style.top = `${fallback.top - (Number(control.scrollTop) || 0)}px`;
+  mirror.style.width = `${width}px`;
+  mirror.style.height = 'auto';
+  mirror.style.minHeight = '0';
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.border = '0';
+  mirror.style.overflow = 'visible';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.zIndex = '-1';
+  mirror.textContent = source.slice(0, caret);
+
+  const marker = doc.createElement('span');
+  marker.textContent = '\u200b';
+  marker.style.display = 'inline-block';
+  marker.style.width = '2px';
+  marker.style.height = `${lineHeight}px`;
+  marker.style.verticalAlign = 'top';
+  mirror.appendChild(marker);
+  doc.body.appendChild(mirror);
+  try {
+    const markerRect = marker.getBoundingClientRect();
+    const left = Number(markerRect.left);
+    const top = Number(markerRect.top);
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return fallback;
+    const height = Math.max(16, Number(markerRect.height) || lineHeight);
+    const width = Math.max(2, Number(markerRect.width) || 2);
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  } finally {
+    mirror.remove();
+  }
+}
+
+function textareaCaretAnchor(control) {
+  return {
+    ownerDocument: control.ownerDocument,
+    getBoundingClientRect: () => textareaCaretRect(control),
+  };
+}
+
+export function mountFloatingPanel(anchor, panel, opts = {}) {
+  const doc = anchor.ownerDocument || document;
+  const root = doc.body;
+  const view = doc.defaultView || (typeof window === 'undefined' ? null : window);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    panel.remove();
+    backdrop.remove();
+    if (view && view.removeEventListener) {
+      view.removeEventListener('resize', position);
+      view.removeEventListener('scroll', position, true);
+      view.removeEventListener('keydown', onKeyDown);
+    }
+    floatingClosers.delete(close);
+    if (opts.onClosed) opts.onClosed();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      if (opts.onDismiss) opts.onDismiss(); else close();
+    }
+  };
+  const backdrop = h('div', {
+    style: `position:fixed;inset:0;z-index:${opts.zIndex || 80}`,
+    onclick: (event) => { event.stopPropagation(); if (opts.onDismiss) opts.onDismiss(); else close(); },
+  });
+  const position = () => {
+    if (closed || !anchor.getBoundingClientRect) return;
+    const rect = anchor.getBoundingClientRect();
+    const viewport = {
+      width: (view && view.innerWidth) || doc.documentElement && doc.documentElement.clientWidth || rect.width,
+      height: (view && view.innerHeight) || doc.documentElement && doc.documentElement.clientHeight || rect.bottom,
+    };
+    const requestedHeight = Math.min(opts.maxHeight || 280, Math.max(panel.scrollHeight || 0, opts.minHeight || 0));
+    const placement = floatingPlacement(rect, viewport, requestedHeight, opts);
+    panel.style.position = 'fixed';
+    panel.style.left = `${placement.left}px`;
+    panel.style.top = `${placement.top}px`;
+    panel.style.width = `${placement.width}px`;
+    panel.style.maxHeight = `${placement.maxHeight}px`;
+    panel.setAttribute('data-sd-direction', placement.direction);
+  };
+  root.appendChild(backdrop);
+  root.appendChild(panel);
+  floatingClosers.add(close);
+  position();
+  if (view && view.addEventListener) {
+    view.addEventListener('resize', position);
+    view.addEventListener('scroll', position, true);
+    view.addEventListener('keydown', onKeyDown);
+  }
+  return { close, position };
+}
+
+// ---- template variable assistance ----
+// This control updates only the active field. It intentionally does not touch
+// application state beyond the normal input event, which keeps the caret and
+// the surrounding form stable while a user browses or filters variables.
+function templateTrigger(label = 'Variables', compact = false) {
+  const button = h('button', {
+    type: 'button', title: 'Insert template variable', 'aria-label': 'Insert template variable',
+    style: `display:inline-flex;align-items:center;gap:${compact ? '0' : '5px'};background:transparent;color:#9c927f;font:600 11.5px/1 'IBM Plex Sans',system-ui,sans-serif;padding:${compact ? '4px' : '3px 4px'};border:0;border-radius:var(--radius-xs);cursor:pointer;transition:color .12s,background .12s;flex-shrink:0`,
+  }, h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:700;color:#e8b88a" }, '{ }'), compact ? null : h('span', {}, label));
+  button.addEventListener('mouseenter', () => { button.style.color = '#e8e2d7'; button.style.background = '#211d17'; });
+  button.addEventListener('mouseleave', () => { button.style.color = '#9c927f'; button.style.background = 'transparent'; });
+  button.addEventListener('mousedown', (event) => event.preventDefault());
+  return button;
+}
+
+function templatePanelRow(suggestion, selected, onPick) {
+  const row = h('button', {
+    type: 'button', role: 'option', 'aria-selected': selected ? 'true' : 'false',
+    style: `width:100%;display:flex;align-items:flex-start;gap:10px;padding:8px 9px;border-radius:var(--radius-xs);background:${selected ? '#2c251c' : 'transparent'};color:#d9d3c7;text-align:left;cursor:pointer`,
+    onmousedown: (event) => event.preventDefault(),
+    onclick: (event) => { event.stopPropagation(); onPick(suggestion); },
+  },
+  h('span', { style: "min-width:0;flex:1;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.45;color:#e8b88a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, suggestion.token),
+  h('span', { style: 'width:42%;min-width:0;font-size:10.5px;line-height:1.35;color:#8e867a;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical' }, suggestion.description || suggestion.label || ''));
+  row.addEventListener('mouseenter', () => { if (!selected) row.style.background = '#29231b'; });
+  row.addEventListener('mouseleave', () => { if (!selected) row.style.background = 'transparent'; });
+  return row;
+}
+
+function templateDynamicHint(suggestions) {
+  const kinds = [...new Set((Array.isArray(suggestions) ? suggestions : [])
+    .map((suggestion) => suggestion && suggestion.dynamicKind)
+    .filter(Boolean))];
+  if (!kinds.length) return '';
+  const names = kinds.length === 1 ? kinds[0]
+    : kinds.length === 2 ? `${kinds[0]} or ${kinds[1]}`
+      : `${kinds.slice(0, -1).join(', ')}, or ${kinds.at(-1)}`;
+  return `Type after the final dot to use any ${names} that is not listed.`;
+}
+
+// Attaches contextual autocomplete to a native input or textarea. Catalog data
+// is supplied by the admin bootstrap, so this helper never invents variables.
+export function attachTemplateAssist(control, suggestions, opts = {}) {
+  const available = Array.isArray(suggestions) ? suggestions : [];
+  if (!control || !available.length) return { open() {}, close() {} };
+
+  const anchor = opts.anchor || control;
+  const inline = opts.inline == null ? String(control.tagName || '').toLowerCase() === 'textarea' : !!opts.inline;
+  const panelAnchor = inline ? textareaCaretAnchor(control) : anchor;
+  const floatingZIndex = 140;
+  let panel = null;
+  let layer = null;
+  let matches = [];
+  let selectedIndex = 0;
+  let mode = null;
+
+  const setTriggerLayer = (open) => {
+    if (!opts.trigger) return;
+    opts.trigger.style.position = opts.trigger.style.position || 'relative';
+    opts.trigger.style.zIndex = open ? String(floatingZIndex + 2) : '';
+  };
+
+  const layerClosed = () => {
+    panel = null;
+    layer = null;
+    matches = [];
+    mode = null;
+    setTriggerLayer(false);
+  };
+  const close = () => {
+    if (!panel) return;
+    const activeLayer = layer;
+    panel = null;
+    layer = null;
+    matches = [];
+    mode = null;
+    setTriggerLayer(false);
+    if (activeLayer) activeLayer.close();
+  };
+  const apply = (suggestion) => {
+    if (!suggestion) return;
+    const next = insertTemplateSuggestion(control.value, control.selectionStart, control.selectionEnd, suggestion);
+    control.value = next.value;
+    try { control.setSelectionRange(next.selectionStart, next.selectionEnd); } catch (_) { /* unsupported input type */ }
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+    close();
+    try { control.focus({ preventScroll: true }); } catch (_) { control.focus(); }
+  };
+  const renderPanel = (query) => {
+    if (!panel) return;
+    matches = contextualTemplateSuggestions(available, query);
+    selectedIndex = Math.max(0, Math.min(selectedIndex, Math.max(0, matches.length - 1)));
+    clear(panel);
+    panel.appendChild(h('div', { style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 8px 8px' },
+      h('div', {},
+        h('div', { style: 'font-size:11.5px;font-weight:700;color:#e8e2d7' }, inline ? 'Complete variable' : 'Template variables'),
+        h('div', { style: 'margin-top:2px;font-size:10.5px;line-height:1.35;color:#746d62' }, mode === 'auto'
+          ? (inline ? 'Enter to complete · ↑↓ to choose · Esc to dismiss' : `Matching {{${query || ''}`)
+          : 'Choose a value to insert')),
+      h('span', { style: "font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#6f685e;white-space:nowrap" }, inline ? 'IDE assist' : '⌘/Ctrl Space')));
+    if (!matches.length) {
+      panel.appendChild(h('div', { style: 'padding:12px 9px 10px;font-size:11.5px;color:#746d62' }, 'No matching variable'));
+    } else {
+      let group = null;
+      matches.forEach((suggestion, index) => {
+        if (suggestion.group !== group) {
+          group = suggestion.group;
+          panel.appendChild(h('div', { style: 'margin:7px 8px 4px;font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#655e54' }, group || 'Variables'));
+        }
+        panel.appendChild(templatePanelRow(suggestion, index === selectedIndex, apply));
+      });
+    }
+    const dynamicHint = templateDynamicHint(available);
+    if (dynamicHint) {
+      panel.appendChild(h('div', { style: 'margin:8px 8px 4px;padding-top:8px;border-top:1px solid #2c271f;font-size:10.5px;line-height:1.4;color:#746d62' },
+        h('span', { style: 'font-weight:700;color:#9c927f' }, 'Tip · '), dynamicHint));
+    }
+    if (layer) layer.position();
+  };
+  const open = (nextMode = 'manual', query = '') => {
+    if (!panel) {
+      closeFloatingPanels();
+      mode = nextMode;
+      setTriggerLayer(true);
+      panel = h('div', { role: 'listbox', 'aria-label': 'Template variables', 'data-sd-template-inline': inline ? 'true' : 'false', style: `z-index:${floatingZIndex + 1};background:#211d17;border-radius:var(--radius-sm);padding:5px;box-shadow:0 18px 42px rgba(0,0,0,.58);animation:sd-in .12s ease;overflow-y:auto;box-sizing:border-box;${inline ? 'border:1px solid rgba(232,184,138,.26)' : ''}` });
+      layer = mountFloatingPanel(panelAnchor, panel, {
+        maxHeight: inline ? 260 : 330,
+        minHeight: 72,
+        preferredWidth: inline ? 340 : undefined,
+        minWidth: inline ? 270 : undefined,
+        zIndex: floatingZIndex,
+        onDismiss: close,
+        onClosed: layerClosed,
+      });
+    } else mode = nextMode;
+    renderPanel(query);
+  };
+  const refreshFromCaret = () => {
+    const active = activeTemplateAt(control.value, control.selectionStart);
+    if (active) {
+      selectedIndex = 0;
+      open('auto', active.query);
+    } else if (mode === 'auto') close();
+  };
+
+  control.addEventListener('input', refreshFromCaret);
+  if (inline) {
+    const navigationKeys = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+    control.addEventListener('focus', refreshFromCaret);
+    control.addEventListener('click', refreshFromCaret);
+    control.addEventListener('keyup', (event) => {
+      if (!navigationKeys.has(event.key) || (panel && (event.key === 'ArrowUp' || event.key === 'ArrowDown'))) return;
+      refreshFromCaret();
+    });
+    control.addEventListener('scroll', () => { if (layer) layer.position(); });
+  }
+  control.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.code === 'Space') {
+      event.preventDefault();
+      selectedIndex = 0;
+      open('manual');
+      return;
+    }
+    if (!panel) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!matches.length) return;
+      selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+      const active = activeTemplateAt(control.value, control.selectionStart);
+      renderPanel(active ? active.query : '');
+    } else if (event.key === 'Enter' || event.key === 'Tab') {
+      if (!matches.length) return;
+      event.preventDefault();
+      apply(matches[selectedIndex]);
+    }
+  });
+  control.addEventListener('blur', () => {
+    setTimeout(() => {
+      const doc = control.ownerDocument || document;
+      if (panel && doc.activeElement !== control) close();
+    }, 0);
+  });
+  if (opts.trigger) opts.trigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    selectedIndex = 0;
+    if (panel) close(); else open('manual');
+  });
+  return { open, close };
+}
+
+// A compact text-field variant used for templated URLs and other single-line
+// fields. The visible { } affordance and Ctrl/⌘+Space use the same picker as
+// code editors, including viewport-aware portal placement.
+export function templateInput(value, placeholder, onInput, opts = {}) {
+  const suggestions = Array.isArray(opts.templateSuggestions) ? opts.templateSuggestions : [];
+  const wrap = h('div', { style: 'position:relative;min-width:0' });
+  const control = h('input', {
+    value: value == null ? '' : value, placeholder, type: opts.type || 'text',
+    style: `${opts.style || ''}${suggestions.length ? ';padding-right:38px' : ''}${opts.color ? `;color:${opts.color}` : ''}`,
+    oninput: (event) => onInput(event.target.value),
+  });
+  wrap.appendChild(control);
+  if (suggestions.length) {
+    const trigger = templateTrigger('', true);
+    trigger.style.position = 'absolute';
+    trigger.style.right = '8px';
+    trigger.style.top = '50%';
+    trigger.style.transform = 'translateY(-50%)';
+    wrap.appendChild(trigger);
+    attachTemplateAssist(control, suggestions, { anchor: control, trigger });
+  }
+  return wrap;
+}
+
+export function templateSuggestionsFor(app, context) {
+  return app && typeof app.templateSuggestions === 'function' ? app.templateSuggestions(context) : [];
+}
+
+// Only one select's panel is open at a time. The state stays inside this
+// module so opening and closing a choice never asks the application to render.
 let openSelectClose = null;
 
-// opts: { value, options:[{value,label,color?}], onPick, mono, width, placeholder }
-// (opts.open/onToggle/onClose from the older app.selectHelper-driven design
-// are accepted but ignored — see the note below.)
-//
-// Opening/closing this dropdown is a purely local DOM operation (append/
-// remove the panel), never a full app.set()/render() call. Every select
-// used to reopen through the shared app-level render — meaning EVERY click
-// tore down and rebuilt the entire screen, replaying any mount animation on
-// every container that happened to have one (e.g. the "New matching rule"
-// card's fade-in), which read as the whole area flickering. Picking a value
-// still goes through the caller's onPick (and typically app.rerender()),
-// since that's a discrete, infrequent action where a full refresh is fine —
-// only the open/close toggle itself needed to stop re-rendering the app.
 export function select(opts) {
   const mono = opts.mono ? "font-family:'IBM Plex Mono',monospace;font-weight:600;" : '';
-  const cur = opts.options.find((o) => o.value === opts.value) || {};
-
+  let currentValue = opts.value;
+  const selectedOption = () => opts.options.find((option) => option.value === currentValue) || {};
+  const initial = selectedOption();
   const chev = raw(icons.chevDown({ w: 15, stroke: '#8a837a', sw: 1.8, style: 'flex-shrink:0;transition:transform .16s;transform:rotate(0deg)' }));
-  const label = h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, cur.label != null ? cur.label : (opts.placeholder || 'Select'));
-  const btnStyle = `width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;background:#17140e;border-radius:var(--radius-sm);padding:10px 13px;font-size:13.5px;text-align:left;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(245,240,230,0.12);color:${cur.color || '#e8e2d7'};${mono}`;
-  const wrap = h('div', { style: `position:relative;${opts.width ? `width:${opts.width};` : ''}` });
+  const label = h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, initial.label != null ? initial.label : (opts.placeholder || 'Select'));
+  const btnStyle = `width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;background:#17140e;border-radius:var(--radius-sm);padding:10px 13px;font-size:13.5px;text-align:left;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(245,240,230,0.12);color:${initial.color || '#e8e2d7'};${mono}`;
+  const wrap = h('div', { style: `${opts.width ? `width:${opts.width};` : ''}` });
+  let panel = null;
+  let layer = null;
+  let btn = null;
 
-  let panel = null, backdrop = null;
+  function syncButton() {
+    const option = selectedOption();
+    label.textContent = option.label != null ? option.label : (opts.placeholder || 'Select');
+    btn.style.color = option.color || '#e8e2d7';
+  }
   function close() {
-    if (panel) { panel.remove(); panel = null; }
-    if (backdrop) { backdrop.remove(); backdrop = null; }
+    if (!panel) return;
+    panel = null;
+    if (layer) { const activeLayer = layer; layer = null; activeLayer.close(); }
     chev.style.transform = 'rotate(0deg)';
+    btn.setAttribute('aria-expanded', 'false');
+    if (openSelectClose === close) openSelectClose = null;
+  }
+  function layerClosed() {
+    if (!panel) return;
+    panel = null;
+    layer = null;
+    chev.style.transform = 'rotate(0deg)';
+    btn.setAttribute('aria-expanded', 'false');
     if (openSelectClose === close) openSelectClose = null;
   }
   function open() {
-    if (openSelectClose) openSelectClose(); // only one dropdown open at a time
-    backdrop = h('div', { style: 'position:fixed;inset:0;z-index:40', onclick: (e) => { e.stopPropagation(); close(); } });
-    panel = h('div', { style: 'position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:41;background:#211d17;border-radius:var(--radius-sm);padding:5px;box-shadow:0 16px 38px rgba(0,0,0,0.55);animation:sd-in .12s ease;max-height:280px;overflow-y:auto' });
-    for (const o of opts.options) {
-      const sel = o.value === opts.value;
-      const rowColor = o.color || (sel ? '#f2ede3' : '#cfc8bc');
+    if (openSelectClose) openSelectClose();
+    closeFloatingPanels();
+    panel = h('div', { role: 'listbox', style: `z-index:81;background:#211d17;border-radius:var(--radius-sm);padding:5px;box-shadow:0 16px 38px rgba(0,0,0,0.55);animation:sd-in .12s ease;overflow-y:auto;box-sizing:border-box` });
+    for (const option of opts.options) {
+      const selected = option.value === currentValue;
+      const rowColor = option.color || (selected ? '#f2ede3' : '#cfc8bc');
       const row = h('button', {
-        style: `width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border-radius:var(--radius-xs);cursor:pointer;text-align:left;font-size:13px;background:${sel ? '#282219' : 'transparent'};color:${rowColor};${mono}`,
-        onclick: (e) => { e.stopPropagation(); close(); opts.onPick(o.value); },
-      }, h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, o.label), sel ? raw(icons.check({ w: 14, stroke: '#238636', sw: 2.2 })) : null);
-      row.addEventListener('mouseenter', () => { if (!sel) row.style.background = '#2f2921'; });
-      row.addEventListener('mouseleave', () => { if (!sel) row.style.background = 'transparent'; });
+        type: 'button', role: 'option', 'aria-selected': selected ? 'true' : 'false',
+        style: `width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border-radius:var(--radius-xs);cursor:pointer;text-align:left;font-size:13px;background:${selected ? '#282219' : 'transparent'};color:${rowColor};${mono}`,
+        onclick: (event) => {
+          event.stopPropagation();
+          if (option.value === currentValue) { close(); return; }
+          currentValue = option.value;
+          syncButton();
+          close();
+          if (opts.onPick) opts.onPick(option.value);
+        },
+      }, h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, option.label), selected ? raw(icons.check({ w: 14, stroke: '#238636', sw: 2.2 })) : null);
+      row.addEventListener('mouseenter', () => { if (!selected) row.style.background = '#2f2921'; });
+      row.addEventListener('mouseleave', () => { if (!selected) row.style.background = 'transparent'; });
       panel.appendChild(row);
     }
-    wrap.appendChild(backdrop);
-    wrap.appendChild(panel);
+    layer = mountFloatingPanel(btn, panel, { maxHeight: 280, onDismiss: close, onClosed: layerClosed });
     chev.style.transform = 'rotate(180deg)';
+    btn.setAttribute('aria-expanded', 'true');
     openSelectClose = close;
   }
 
-  const btn = h('button', { style: btnStyle, onclick: (e) => { e.stopPropagation(); if (panel) close(); else open(); } }, label, chev);
+  btn = h('button', { type: 'button', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', style: btnStyle, onclick: (event) => { event.stopPropagation(); if (panel) close(); else open(); } }, label, chev);
   wrap.appendChild(btn);
   return wrap;
 }
@@ -316,13 +725,27 @@ export function sparkline(values, opts = {}) {
     `</svg>`;
 }
 
-// Reused <sd-json-editor> web component wrapper.
-export function jsonEditor(value, rows, onInput) {
+// Reused code editor wrapper. The legacy custom-element name remains stable
+// while its language attribute drives highlighting, validation and formatting.
+export function codeEditor(value, rows, onInput, opts = {}) {
   const el = document.createElement('sd-json-editor');
   el.setAttribute('rows', String(rows || 6));
+  el.setAttribute('language', opts.language || 'json');
   el.setAttribute('value', value == null ? '' : String(value));
-  if (onInput) el.addEventListener('input', (e) => onInput(e.target.value));
+  if (opts.validation) el.externalValidation = opts.validation;
+  if (Array.isArray(opts.templateSuggestions) && opts.templateSuggestions.length) {
+    el.templateSuggestions = opts.templateSuggestions;
+    el.addEventListener('sd-editor-ready', () => {
+      const control = typeof el.getInputElement === 'function' ? el.getInputElement() : null;
+      if (control) attachTemplateAssist(control, opts.templateSuggestions, { anchor: el._wrap || control, trigger: el.templateButton, inline: true });
+    }, { once: true });
+  }
+  if (onInput) el.addEventListener('input', (e) => onInput(e.target.value, el));
   return el;
+}
+
+export function jsonEditor(value, rows, onInput, opts = {}) {
+  return codeEditor(value, rows, onInput, { ...opts, language: 'json' });
 }
 
 // Attach a background hover swap to a node.
