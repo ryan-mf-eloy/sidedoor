@@ -100,15 +100,15 @@ function run() {
   store.setActiveWorkspace(sidedoor.id);
 
   const wsId = sidedoor.id;
-  const gateway = store.createProject(wsId, 'Gateway Pagamento BR');
-  const integ = store.createProject(wsId, 'Integração X');
+  const gateway = store.createProject(wsId, 'Payments Gateway');
+  const integ = store.createProject(wsId, 'Partner Integrations');
 
   seedWebhook(wsId, gateway.id, { name: 'Stripe Webhooks', slug: 'stripe-prod', provider: 'stripe', signed: true }, 9, (i, now) => {
     const body = stripeBody(i, now); const bs = JSON.stringify(body);
     return { method: 'POST', path: '/stripe-prod', status: 200, ip: '54.187.174.' + (100 + i), size: bs.length + 438, receivedAt: now - (9 - i) * 41000, eventLabel: body.type, contentType: 'application/json', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Stripe/1.0 (+https://stripe.com/docs/webhooks)', 'Stripe-Signature': 't=' + Math.floor(now / 1000) + ',v1=' + rid(32) }, query: {}, body: JSON.stringify(body, null, 2), responseStatus: 200, responseBody: '{"received":true}', outcome: 'captured', signature: 'valid' };
   });
 
-  seedWebhook(wsId, gateway.id, { name: 'PagSeguro Notif.', slug: 'pagseguro', provider: 'custom', signed: true }, 4, (i, now) => {
+  seedWebhook(wsId, gateway.id, { name: 'PagSeguro Notifications', slug: 'pagseguro', provider: 'custom', signed: true }, 4, (i, now) => {
     const body = { notificationCode: rid(20).toUpperCase(), notificationType: 'transaction', status: [3, 4, 7][i % 3] }; const bs = JSON.stringify(body);
     return { method: 'POST', path: '/pagseguro', status: 200, ip: '177.72.' + (10 + i) + '.4', size: bs.length + 300, receivedAt: now - 240000 - (4 - i) * 90000, eventLabel: 'transaction.updated', contentType: 'application/json', headers: { 'Content-Type': 'application/json', 'X-Signature': rid(40) }, query: {}, body: JSON.stringify(body, null, 2), responseStatus: 200, responseBody: '{"received":true}', outcome: 'captured', signature: 'valid' };
   });

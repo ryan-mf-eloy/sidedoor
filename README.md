@@ -1,94 +1,145 @@
+<div align="center">
+
 # Sidedoor
 
-Sidedoor is the local-first developer tool behind the `GatewayIPS.Tools.MockServer`
-repository. It lets GatewayIPS developers inspect webhooks, simulate HTTP and
-realtime providers, and exercise integration flows without changing provider
-systems. Runtime state is stored in a local SQLite database.
+**A local-first webhook inspector, API mock server, and realtime protocol test harness.**
 
-> Last reviewed: 2026-07-29
+Capture and replay webhooks, mock HTTP, WebSocket, Socket.IO, and GraphQL APIs,
+send scripted callbacks, and expose a single port to the internet through
+Tailscale Funnel. Everything runs on your machine and is stored in one SQLite file.
 
-## What it provides
+![Node.js 24+](https://img.shields.io/badge/node-%3E%3D24-339933?logo=node.js&logoColor=white)
+![SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-node%3Atest-555555)
+![UI](https://img.shields.io/badge/UI-dependency--free-555555)
 
-- **Webhook inspection** — capture requests, inspect headers/query/body, validate
-  HMAC signatures, enforce auth and rate limits, forward or transform traffic,
-  replay requests, diff payloads, and export history.
-- **HTTP mocks** — match method/path, return one or more response scenarios,
-  apply conditional rules, add delays, and record the exact response sent.
-- **Async scenario events** — send ordered, templated callbacks after a mock
-  response with durable delivery state, retries, cancellation, and redacted
-  history.
-- **Realtime mocks and inspectors** — WebSocket, Socket.IO, and GraphQL HTTP/
-  `graphql-transport-ws` sessions with ordered scripts, fixtures, and transcripts.
-- **Workspaces and projects** — keep client, environment, or integration
-  endpoints grouped without sharing data between workspaces.
-- **Tailscale Funnel integration** — expose only the ingest listener when a
-  provider must reach a local endpoint.
-- **Live dashboard** — endpoint counts, traffic summaries, activity, sessions,
-  and delivery updates through the admin UI and SSE.
+![Sidedoor dashboard](docs/screenshots/dashboard.png)
 
-Sidedoor is a development and test tool. It is not a production webhook gateway,
-API gateway, or durable replacement for a provider's delivery system.
+</div>
 
-## Requirements
+## Contents
 
-- Node.js **24 or newer** (the runtime uses the built-in `node:sqlite`).
-- npm (ships with Node.js).
-- Tailscale is optional and is required only for Funnel exposure.
+- [Why Sidedoor](#why-sidedoor)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+  - [Webhook inspector](#webhook-inspector)
+  - [HTTP mock servers](#http-mock-servers)
+  - [Async callbacks](#async-callbacks)
+  - [WebSocket, Socket.IO, and GraphQL](#websocket-socketio-and-graphql)
+  - [Workspaces and projects](#workspaces-and-projects)
+  - [Exposing endpoints with Tailscale Funnel](#exposing-endpoints-with-tailscale-funnel)
+- [Configuration](#configuration)
+- [Admin API](#admin-api)
+- [Architecture](#architecture)
+- [Security](#security)
+- [Development](#development)
+
+## Why Sidedoor
+
+Integrating with payment providers, SaaS webhooks, or realtime APIs usually
+means waiting on a sandbox you do not control. Sidedoor gives you both sides of
+the conversation locally:
+
+- **Receive** what a provider sends, verify its signature, and inspect every
+  header and byte.
+- **Impersonate** a provider with deterministic responses, error scenarios,
+  latency, and follow-up callbacks.
+- **Expose** only the traffic port when a deployed service or a real provider
+  must reach your machine.
+
+It is a development and test tool. It is not a production webhook gateway, API
+gateway, or durable replacement for a provider's delivery system.
+
+## Features
+
+| Area | What you get |
+| --- | --- |
+| **Webhook inspection** | Request capture with headers, query, and body; HMAC validation; auth; rate limits; forwarding and transform rules; replay; side-by-side diff; JSON export |
+| **HTTP mocks** | Method and path matching, named response scenarios, single or sequential mode, conditional matching rules, artificial delay, and a record of every response sent |
+| **Async callbacks** | Ordered, templated callbacks after a mock response, with durable delivery state, retries, cancellation, and redacted history |
+| **Realtime mocks** | WebSocket, Socket.IO v4, and GraphQL (HTTP and `graphql-transport-ws`) with ordered scripts, fixtures, and persisted transcripts |
+| **Organization** | Workspaces that isolate data, and projects that group endpoints inside a workspace |
+| **Public exposure** | Tailscale Funnel integration that exposes the ingest listener only |
+| **Live dashboard** | Endpoint counts, traffic overview, recent activity, and live updates over Server-Sent Events |
+
+Signature presets cover **Stripe**, **GitHub**, **Shopify**, **Twilio**,
+**Slack**, and custom HMAC algorithms. Auth supports Bearer tokens, API keys (in a
+header or the query string), and Basic credentials.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/webhooks.png" alt="Webhook list grouped by project"><br><sub><b>Webhooks</b> — endpoints grouped by project, each with its own URL.</sub></td>
+    <td width="50%"><img src="docs/screenshots/webhook-inspector.png" alt="Webhook inspector with a captured Stripe event"><br><sub><b>Inspector</b> — live request feed, signature status, and payload preview.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/mock-servers.png" alt="Mock servers across HTTP and WebSocket"><br><sub><b>Mock servers</b> — HTTP, WebSocket, Socket.IO, and GraphQL in one place.</sub></td>
+    <td width="50%"><img src="docs/screenshots/mock-server.png" alt="HTTP mock with response scenarios and matching rules"><br><sub><b>HTTP mock</b> — response scenarios, delays, and matching rules.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/async-deliveries.png" alt="Delivery runs for async callbacks"><br><sub><b>Deliveries</b> — every callback run with its outcome.</sub></td>
+    <td width="50%"><img src="docs/screenshots/realtime-transcript.png" alt="WebSocket session transcript with redacted token"><br><sub><b>Realtime</b> — scripted WebSocket conversation with a redacted transcript.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/tailscale-funnel.png" alt="Tailscale Funnel control screen"><br><sub><b>Tailscale Funnel</b> — public exposure state and history.</sub></td>
+    <td width="50%"><img src="docs/screenshots/dashboard.png" alt="Dashboard overview"><br><sub><b>Dashboard</b> — counts, recent activity, and traffic by status class.</sub></td>
+  </tr>
+</table>
+
+The screenshots use the demo data from `npm run seed`.
 
 ## Quick start
 
+**Requirements:** Node.js **24 or newer** (Sidedoor uses the built-in
+`node:sqlite`) and npm. Tailscale is optional and is needed only for public
+exposure.
+
 ```bash
-git clone https://github.com/luby-fintech-br/GatewayIPS.Tools.MockServer.git
-cd GatewayIPS.Tools.MockServer
+git clone https://github.com/ryan-mf-eloy/sidedoor.git
+cd sidedoor
 npm ci
 npm start
 ```
 
-Open <http://127.0.0.1:4600> and create a webhook or mock. Sidedoor starts two
-listeners:
+Open <http://127.0.0.1:4600>. The database starts empty; run `npm run seed`
+first if you want demo workspaces, endpoints, and traffic to explore.
+
+Sidedoor starts two listeners:
 
 | Listener | Default bind | Responsibility |
 | --- | --- | --- |
 | Admin (`4600`) | `127.0.0.1` | UI, REST API, SSE, and configuration |
-| Ingest (`4601`) | `0.0.0.0` | Webhook/mock traffic and realtime upgrades |
+| Ingest (`4601`) | `0.0.0.0` | Webhook and mock traffic, realtime upgrades |
 
-Only the ingest listener is eligible for Tailscale Funnel. An endpoint is reached
-by its unique slug:
+Every endpoint is reached by its unique slug on the ingest listener:
 
 ```text
 http://localhost:4601/<slug>
-https://<machine>.<tailnet>.ts.net/<slug>  # when Funnel is enabled
+https://<machine>.<tailnet>.ts.net/<slug>   # when Funnel is enabled
 ```
 
-### Useful commands
+### Scripts
 
-```bash
-npm run dev                 # restart on source changes
-npm run seed                # load generic demo workspaces and traffic
-npm run reset               # clear the local database and reseed the demo data
-npm run seed:oips-cielo-pix # load the GatewayIPS Cielo PIX integration fixture
-npm test                    # run the complete node:test suite
-```
+| Command | Purpose |
+| --- | --- |
+| `npm start` | Start the admin and ingest listeners |
+| `npm run dev` | Start and restart on source changes |
+| `npm run seed` | Load demo workspaces, endpoints, and captured traffic into an empty database |
+| `npm run reset` | Clear the database and load the demo data again |
+| `npm test` | Run the complete `node:test` suite |
 
-The default database is `./sidedoor.db`. It is ignored by Git. Use
-`SIDEDOOR_DB=:memory:` for an ephemeral local instance or tests.
+## Usage
 
-## Using Sidedoor
-
-### Webhooks
+### Webhook inspector
 
 1. Open **Webhooks → New webhook**.
-2. Choose a name and slug, then optionally configure a project, auth, HMAC
-   provider, rate limit, or forwarding rules.
-3. Send the provider request to `http://localhost:4601/<slug>`.
-4. Inspect the captured request from the endpoint's Requests tab.
-
-Auth supports Bearer, API key (header or query), and Basic credentials. HMAC
-presets cover Stripe, GitHub, Shopify, Twilio, Slack, and custom algorithms.
-Forwarding rules can forward, drop, respond, tag, or transform a request. Invalid
-credentials and signatures fail closed; they never match an empty value.
-
-Example:
+2. Choose a name and slug. Optionally set a project, auth, an HMAC provider, a
+   rate limit, or forwarding rules.
+3. Point the provider at `http://localhost:4601/<slug>`.
+4. Inspect each request in the endpoint's live feed.
 
 ```bash
 curl -i -X POST http://localhost:4601/example-webhook \
@@ -96,43 +147,67 @@ curl -i -X POST http://localhost:4601/example-webhook \
   -d '{"event":"checkout.completed","id":"evt_123"}'
 ```
 
-### HTTP mocks
+Forwarding rules can **forward**, **drop**, **respond**, **tag**, or **transform**
+a request. Invalid credentials and signatures fail closed: an empty value never
+matches. From the inspector you can replay a request, compare two requests side
+by side, or export the history as JSON.
 
-Create a mock from **Mock Servers → New mock server → HTTP API**. Configure the
-method, path, default response, and optional auth. A mock accepts only its
-configured method and path (or configured prefix); other methods return `405` and
-other paths return `404`.
+### HTTP mock servers
 
-Each mock can have named response scenarios:
+Create one from **Mock Servers → New mock server → HTTP API** and set the method,
+path, default response, and optional auth. A mock answers only its configured
+method and path (or path prefix): other methods return `405` and other paths
+return `404`.
 
-- **Single** always returns the active scenario.
-- **Sequential** rotates through scenarios in order.
-- Matching rules select a scenario by header, body field, query parameter, method,
-  or path using `equals`, `contains`, `regex`, `exists`, `>`, `<`, or `≠`.
+Each mock holds named **response scenarios**:
 
-The Requests tab records the request and the response that was returned. Scenario
-events run after a matched mock response, so the client response is never held
-open while callbacks are delivered. Delivery runs are at-least-once, retry only
-network/time-out/`408`/`425`/`429`/`5xx` failures, and redact credentials and
-secret-looking fields in history.
+- **Single** mode always returns the active scenario.
+- **Sequential** mode rotates through scenarios in order.
+- **Matching rules** pick a scenario by header, body field, query parameter,
+  method, or path, using `equals`, `contains`, `regex`, `exists`, `>`, `<`, or `≠`.
 
-Templates may be used in callback URLs, headers, and bodies. Common values are
-`{{request.method}}`, `{{request.path}}`, `{{request.headers.<name>}}`,
-`{{request.body.<field>}}`, `{{response.status}}`, `{{response.body.<field>}}`,
-and `{{randomUuid}}`. Callback origins are fixed, redirects are refused, and
-timeouts are bounded.
+```bash
+curl -i -X POST http://localhost:4601/mock-payments/v1/charges \
+  -H 'authorization: Bearer <token>' \
+  -H 'x-test-scenario: decline' \
+  -H 'content-type: application/json' \
+  -d '{"amount":4990,"currency":"brl"}'
+```
+
+The **Requests** tab records each request together with the response that was
+returned.
+
+### Async callbacks
+
+Attach events to a scenario to have Sidedoor call another service after the mock
+responds, as a provider would. The client response is never held open while
+callbacks run.
+
+- Events run in order, with a delay, optional repeats, and retries.
+- Delivery is at-least-once. Only network errors, timeouts, `408`, `425`, `429`,
+  and `5xx` responses are retried.
+- Each run keeps an immutable snapshot of its configuration, so editing an event
+  never redirects a delivery that is already scheduled.
+- Credentials and secret-looking fields are redacted in delivery history.
+
+URLs, headers, and bodies accept templates such as `{{request.method}}`,
+`{{request.path}}`, `{{request.headers.<name>}}`, `{{request.body.<field>}}`,
+`{{response.status}}`, `{{response.body.<field>}}`, and `{{randomUuid}}`.
+Callback origins are fixed, redirects are refused, and timeouts are bounded.
 
 ### WebSocket, Socket.IO, and GraphQL
 
-Select **Mock Servers → New mock server** and choose a realtime protocol.
+Choose a realtime protocol under **Mock Servers → New mock server**.
 
-- **WebSocket** uses `ws://localhost:4601/<slug>` and an ordered script of
-  expected messages/actions.
-- **Socket.IO v4** uses the endpoint slug as a namespace and the fixed Engine.IO
-  path `/_sidedoor/socket.io/`:
+- **WebSocket** listens on `ws://localhost:4601/<slug>` and follows an ordered
+  script of expected messages and actions.
+- **Socket.IO v4** uses the slug as a namespace and the fixed Engine.IO path
+  `/_sidedoor/socket.io/`:
 
   ```js
-  io('http://localhost:4601/orders', {
+  import { io } from 'socket.io-client';
+
+  const socket = io('http://localhost:4601/orders', {
     path: '/_sidedoor/socket.io/',
     transports: ['websocket', 'polling'],
   });
@@ -142,169 +217,148 @@ Select **Mock Servers → New mock server** and choose a realtime protocol.
   `graphql-transport-ws`. Define an SDL schema and deterministic fixtures in the
   endpoint configuration.
 
-Sessions and messages are persisted with redacted payload previews. Live sockets
-are closed, not resumed, after a process restart.
+Sessions and messages are persisted with redacted payload previews. **Run test
+flow** plays a scripted conversation without an external client. Live sockets
+are closed, not resumed, when the process restarts.
 
-### GatewayIPS Cielo PIX fixture
+### Workspaces and projects
 
-The repository keeps the integration fixture used by the GatewayIPS E2E suites.
-Start Sidedoor, then run:
+Workspaces keep clients, environments, or integrations fully apart: endpoints,
+requests, and settings are never shared between workspaces. Inside a workspace,
+projects group related endpoints. Switch workspaces from the menu at the top of
+the sidebar.
 
-```bash
-npm run seed:oips-cielo-pix
-```
+### Exposing endpoints with Tailscale Funnel
 
-The seed recreates these provider-compatible mocks:
+Use Funnel when a real provider or a deployed service must reach an endpoint on
+your machine. Funnel exposes **only the ingest listener** (`4601`); the admin UI
+and API (`4600`) stay local.
 
-| Slug | Methods | Path prefix |
-| --- | --- | --- |
-| `oips-cielo-tx` | `POST`, `PUT` | `/1/sales` |
-| `oips-cielo-query` | `GET` | `/1/sales/` |
-
-Scenario markers and callback wiring are documented with the fixture source in
-[`src/seed-oips-cielo-pix.js`](src/seed-oips-cielo-pix.js) and the GatewayIPS E2E
-documentation. Funnel is required when the deployed service must reach the local
-mock; the admin listener must remain private.
-
-### Tailscale Funnel
-
-Use Tailscale Funnel when an external provider or a deployed GatewayIPS service
-must reach a Sidedoor endpoint running on your machine. Funnel exposes only the
-ingest listener (`4601` by default); the admin UI/API (`4600`) remains local.
-
-### Configure Tailscale
-
-1. [Install Tailscale](https://tailscale.com/docs/install) and authenticate the
-   machine with `tailscale up`.
-2. Enable the prerequisites required by your tailnet (MagicDNS, HTTPS
-   certificates, and permission to use Funnel). Follow the [Tailscale Funnel
-   guide](https://tailscale.com/kb/1223/funnel) for the current account and
-   policy settings.
-3. Start Sidedoor and confirm the local ingest listener is available:
-
-   ```bash
-   npm start
-   curl http://localhost:4601/
-   ```
-
-4. Enable Funnel from Sidedoor's **Tailscale** screen, or run the equivalent CLI
-   commands:
+1. [Install Tailscale](https://tailscale.com/docs/install) and run
+   `tailscale up`.
+2. Make sure your tailnet allows Funnel (MagicDNS, HTTPS certificates, and the
+   Funnel node attribute). See the
+   [Funnel guide](https://tailscale.com/kb/1223/funnel).
+3. Start Sidedoor and confirm the endpoint answers locally.
+4. Turn Funnel on from the **Tailscale** screen, or run:
 
    ```bash
    tailscale funnel --bg 4601
    tailscale funnel status
    ```
 
-   The status output contains the HTTPS hostname. An endpoint is then available
-   at `https://<machine>.<tailnet>.ts.net/<slug>`.
+   Endpoints are then reachable at `https://<machine>.<tailnet>.ts.net/<slug>`.
 
-5. When the external test is complete, disable only Sidedoor's listener:
+5. When the test is over, turn it off:
 
    ```bash
    tailscale funnel 4601 off
    ```
 
-Sidedoor uses the same commands through the admin API, polls the JSON status, and
-records the exposure state locally. It never runs a global `tailscale funnel
-reset`, so unrelated Funnel configurations are left alone. For command flags and
-version-specific behavior, see the [`tailscale funnel` CLI
-reference](https://tailscale.com/docs/reference/tailscale-cli/funnel). If the
-service should be reachable only by devices in your tailnet, use [Tailscale
-Serve](https://tailscale.com/docs/features/tailscale-serve) instead of Funnel.
+Sidedoor runs the same commands through its admin API, polls the status, and
+records the exposure history. It never runs a global `tailscale funnel reset`,
+so other Funnel configurations on the machine are left alone. To keep an
+endpoint reachable only inside your tailnet, use
+[Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) instead.
 
-Treat a Funnel URL as public. Keep the admin port private, configure endpoint
-authentication/signature validation where appropriate, and verify the public HTTP
-or realtime upgrade path before running an integration test.
+> [!WARNING]
+> Treat a Funnel URL as public. Keep the admin port private and enable endpoint
+> authentication or signature validation before exposing anything.
 
 ## Configuration
 
-All settings are optional. Defaults keep the admin API local and the database in
-the repository directory.
+Every setting is optional and read from the environment.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SIDEDOOR_HOST` | `127.0.0.1` | Admin bind host |
-| `SIDEDOOR_PORT` | `4600` | Admin UI/API port |
+| `SIDEDOOR_PORT` | `4600` | Admin UI and API port |
 | `SIDEDOOR_INGEST_HOST` | `0.0.0.0` | Ingest bind host |
-| `SIDEDOOR_INGEST_PORT` | `4601` | Ingest/Funnel port |
+| `SIDEDOOR_INGEST_PORT` | `4601` | Ingest and Funnel port |
 | `SIDEDOOR_DB` | `./sidedoor.db` | SQLite path; `:memory:` is supported |
-| `SIDEDOOR_MAX_BODY` | `5242880` | Maximum captured HTTP body in bytes |
-| `SIDEDOOR_MAX_REALTIME_FRAME` | `16777216` | Process-wide realtime frame ceiling |
-| `SIDEDOOR_TAILSCALE_BIN` | `tailscale` | Tailscale executable path |
-| `SIDEDOOR_FUNNEL_POLL_MS` | `10000` | Funnel status poll interval; `0` disables |
-
-Example:
+| `SIDEDOOR_MAX_BODY` | `5242880` | Maximum captured HTTP body, in bytes |
+| `SIDEDOOR_MAX_REALTIME_FRAME` | `16777216` | Process-wide realtime frame limit, in bytes |
+| `SIDEDOOR_TAILSCALE_BIN` | `tailscale` | Path to the Tailscale executable |
+| `SIDEDOOR_FUNNEL_POLL_MS` | `10000` | Funnel status poll interval; `0` disables polling |
 
 ```bash
-SIDEDOOR_PORT=4700 SIDEDOOR_INGEST_PORT=4701 npm start
+SIDEDOOR_PORT=4700 SIDEDOOR_INGEST_PORT=4701 SIDEDOOR_DB=/tmp/sidedoor.db npm start
 ```
 
-## Architecture at a glance
-
-```text
-Browser ───────► Admin server :4600 ──► REST/SSE ──► SQLite
-Provider/client ► Ingest server :4601 ─► endpoint runtime ─► SQLite
-Tailscale Funnel ─────────────────────► Ingest server only
-```
-
-The admin and ingest listeners share one store but have separate responsibilities:
-the admin surface configures and observes endpoints, while the ingest surface
-handles provider traffic. The ingest server has no admin routes.
-
-```text
-src/server.js       process entry point and listener lifecycle
-src/api/             admin REST router and route handlers
-src/ingest/          HTTP webhook/mock dispatch and GraphQL HTTP
-src/lib/             auth, HMAC, matching, validation, realtime, delivery helpers
-src/realtime-hub.js  WebSocket, Socket.IO, and GraphQL WS coordination
-src/store.js         SQLite persistence and migrations
-public/              dependency-free browser UI
-test/                unit, API, transport, persistence, and UI tests
-docs/adr/            architectural decision records
-```
+The database file is ignored by Git. Use `SIDEDOOR_DB=:memory:` for a throwaway
+instance.
 
 ## Admin API
 
-The UI is a client of the localhost-only API at
-`http://127.0.0.1:4600/__sd/api`. Useful starting points:
+The UI is a client of a REST API served on the admin listener at
+`http://127.0.0.1:4600/__sd/api`.
 
 ```bash
 curl http://127.0.0.1:4600/__sd/api/state
 curl 'http://127.0.0.1:4600/__sd/api/endpoints?protocol=http'
 ```
 
-Endpoint, scenario, rule, event-run, realtime-session, GraphQL fixture, request,
-replay, diff, export, Funnel, and SSE routes are defined in
-[`src/api/routes.js`](src/api/routes.js). Keep the admin listener bound to
-localhost unless the deployment explicitly provides equivalent access control.
+Routes for endpoints, scenarios, rules, events and delivery runs, realtime
+sessions, GraphQL fixtures, requests, replay, diff, export, Funnel, and the SSE
+stream are defined in [`src/api/routes.js`](src/api/routes.js).
 
-## Security and data handling
+## Architecture
 
-- The admin API binds to localhost by default and is never Funnel-exposed.
-- Auth and HMAC checks fail closed; HMAC comparisons are timing-safe.
+```text
+Browser ─────────────► Admin   :4600 ──► REST / SSE ───────► SQLite
+Provider or client ──► Ingest  :4601 ──► endpoint runtime ─► SQLite
+Tailscale Funnel ────► Ingest  :4601 only
+```
+
+The two listeners share one store but never each other's routes: the admin
+surface configures and observes endpoints, and the ingest surface only handles
+traffic.
+
+```text
+src/server.js         process entry point and listener lifecycle
+src/api/              admin REST router and route handlers
+src/ingest/           HTTP webhook and mock dispatch, GraphQL over HTTP
+src/lib/              auth, HMAC, matching, validation, realtime, delivery helpers
+src/realtime-hub.js   WebSocket, Socket.IO, and GraphQL WS coordination
+src/event-dispatcher.js  durable async callback queue
+src/store.js          SQLite persistence and migrations
+public/               dependency-free browser UI
+test/                 unit, API, transport, persistence, and UI tests
+docs/adr/             architecture decision records
+```
+
+Design decisions are recorded in [`docs/adr`](docs/adr):
+
+- [0001 — Durable scenario event queue](docs/adr/0001-durable-scenario-event-queue.md)
+- [0002 — Realtime protocol multiplexer](docs/adr/0002-realtime-protocol-multiplexer.md)
+
+## Security
+
+- The admin API binds to localhost by default and is never exposed through Funnel.
+- Auth and HMAC checks fail closed, and HMAC comparisons are timing-safe.
 - Callback destinations must be absolute HTTP(S) URLs without embedded
-  credentials; redirects and hop-by-hop/host headers are rejected.
+  credentials. Redirects, hop-by-hop headers, and `Host` overrides are rejected.
 - Credentials, signatures, cookies, authorization headers, and sensitive JSON
-  fields are redacted before delivery/realtime history is persisted.
-- The SQLite file contains endpoint configuration and may contain credentials;
-  keep it local and never commit it.
-- Do not use Sidedoor as an internet-facing production service without adding
-  authentication, access control, backups, and an operational data-retention plan.
+  fields are redacted before delivery and realtime history is stored.
+- The SQLite file holds endpoint configuration and may hold credentials. Keep it
+  local and never commit it.
+- Do not run Sidedoor as an internet-facing production service without adding
+  authentication, access control, backups, and a data-retention plan.
 
-## Testing and contribution
-
-Install dependencies with `npm ci`, then run:
+## Development
 
 ```bash
+npm ci
 npm test
 ```
 
 The `node:test` suite covers auth and HMAC providers, rate limiting, matching and
-validation, SQLite migrations/cascades, the REST API, HTTP ingest, async delivery
-ordering/retries/redaction/recovery, WebSocket and Socket.IO transports, GraphQL
-HTTP/WS, and browser UI helpers. Tests use ephemeral ports and temporary SQLite
-files; they do not require Tailscale or provider credentials.
+validation, SQLite migrations and cascades, the REST API, HTTP ingest, async
+delivery ordering, retries, redaction, and recovery, WebSocket and Socket.IO
+transports, GraphQL over HTTP and WS, and the browser UI helpers. Tests use
+ephemeral ports and temporary databases and need neither Tailscale nor provider
+credentials.
 
-When changing runtime behavior, update the closest test and keep the admin/ingest
-boundary intact. Record a short ADR in `docs/adr/` for a new persistence model,
-external dependency, or module boundary.
+When you change runtime behavior, update the closest test and keep the boundary
+between the admin and ingest listeners intact. Record a short ADR in `docs/adr/`
+for a new persistence model, external dependency, or module boundary.
