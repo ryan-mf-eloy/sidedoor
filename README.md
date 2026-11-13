@@ -12,6 +12,7 @@ Tailscale Funnel. Everything runs on your machine and is stored in one SQLite fi
 ![SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
 ![Tests](https://img.shields.io/badge/tests-node%3Atest-555555)
 ![UI](https://img.shields.io/badge/UI-dependency--free-555555)
+[![License: MIT](https://img.shields.io/badge/license-MIT-555555)](LICENSE)
 
 ![Sidedoor dashboard](docs/screenshots/dashboard.png)
 
@@ -35,6 +36,7 @@ Tailscale Funnel. Everything runs on your machine and is stored in one SQLite fi
 - [Architecture](#architecture)
 - [Security](#security)
 - [Development](#development)
+- [License](#license)
 
 ## Why Sidedoor
 
@@ -362,3 +364,7 @@ credentials.
 When you change runtime behavior, update the closest test and keep the boundary
 between the admin and ingest listeners intact. Record a short ADR in `docs/adr/`
 for a new persistence model, external dependency, or module boundary.
+
+## License
+
+Sidedoor is released under the [MIT License](LICENSE).

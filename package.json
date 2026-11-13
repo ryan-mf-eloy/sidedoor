@@ -2,6 +2,7 @@
   "name": "sidedoor",
   "version": "1.0.0",
   "description": "Sidedoor: a local-first webhook inspector, API mock server, and realtime protocol test harness.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "repository": {
